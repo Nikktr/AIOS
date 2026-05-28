@@ -113,6 +113,20 @@ def get_numbers_sequential(agent_list, agent_factory):
     }
 
     return metrics
+return {
+            'avg': np.mean(data),
+            'p90': np.percentile(data, 90),
+            'p99': np.percentile(data, 99)
+        } if len(data) else {'avg': 0.0, 'p90': 0.0, 'p99': 0.0}
+
+    metrics = {
+        'agent_waiting_time': compute_metrics(stats['waiting_times']),
+        'agent_turnaround_time': compute_metrics(stats['turnaround_times']),
+        'request_waiting_time': compute_metrics(stats['request_waiting_times']),
+        'request_turnaround_time': compute_metrics(stats['request_turnaround_times'])
+    }
+
+    return metrics
 
 
 def calculate_improvement(sequential, concurrent):
