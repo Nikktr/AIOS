@@ -288,6 +288,19 @@
   }
   .simple-modal-header h3 { font-size: 15px; margin: 0; text-transform: none; color: var(--text); letter-spacing: 0; }
   .simple-modal-body { padding: 16px 20px; overflow-y: auto; flex: 1; }
+  .git-info { font-size: 12px; margin-bottom: 8px; }
+  .git-info .git-branch { color: var(--accent); font-weight: 600; }
+  .git-info .git-remote { color: var(--text2); word-break: break-all; }
+  .git-info .git-ahead { color: var(--yellow); }
+  .git-info .git-behind { color: var(--red); }
+  .git-changes { font-size: 11px; color: var(--text2); max-height: 80px; overflow-y: auto; white-space: pre; font-family: monospace; margin: 6px 0; padding: 6px; background: var(--bg); border-radius: 4px; }
+  .git-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .git-actions input { flex: 1; min-width: 120px; font-size: 12px; padding: 6px 8px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); outline: none; }
+  .git-actions input:focus { border-color: var(--accent); }
+  .git-actions input::placeholder { color: var(--text2); }
+  .git-no-repo { font-size: 12px; color: var(--text2); }
+  .git-no-repo input { width: 100%; font-size: 12px; padding: 6px 8px; margin: 6px 0; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); outline: none; }
+  .git-no-repo input::placeholder { color: var(--text2); }
   .component {
     display: flex;
     justify-content: space-between;
@@ -572,6 +585,15 @@
       <h3>Agent Processes</h3>
       <div id="processSummary" class="processes-summary">
         <span style="color:var(--text2)">No processes</span>
+      </div>
+    </div>
+    <div class="section">
+      <div class="collapsible-header" onclick="toggleCollapsible('gitSection')">
+        <span class="toggle-arrow open" id="gitSectionArrow">&#9654;</span>
+        <h3 style="margin-bottom:0">Git</h3>
+      </div>
+      <div class="collapsible-body" id="gitSectionBody">
+        <div id="gitStatus" style="margin-top:8px;font-size:13px;color:var(--text2)">Select a project</div>
       </div>
     </div>
     <div class="section">
@@ -900,6 +922,7 @@ function selectProject(name) {
   renderChat();
   loadMcpForProject();
   loadMemories();
+  loadGitStatus();
 }
 
 async function addProject() {
@@ -1606,6 +1629,85 @@ function toggleTheme() {
   saveSettings();
 }
 
+// --- Git ---
+
+async function loadGitStatus() {
+  const el = document.getElementById('gitStatus');
+  const path = projectPaths[activeProject];
+  if (!path) {
+    el.innerHTML = '<span class="git-no-repo">No project path set</span>';
+    return;
+  }
+  const data = await api('/project/' + encodeURIComponent(activeProject) + '/git/status?path=' + encodeURIComponent(path));
+  if (!data || data.status !== 'success') {
+    el.innerHTML = '<span class="git-no-repo">Cannot read git status</span>';
+    return;
+  }
+  if (!data.is_repo) {
+    el.innerHTML = '<div class="git-no-repo">Not a git repo<br>'
+      + '<input id="gitRemoteUrl" placeholder="https://github.com/..." />'
+      + '<button class="btn" style="font-size:11px;padding:3px 10px;margin-top:4px" onclick="gitInitRepo()">Init Repo</button></div>';
+    return;
+  }
+  let html = '<div class="git-info">';
+  html += '<span class="git-branch">' + escapeHtml(data.branch || 'detached') + '</span>';
+  if (data.ahead > 0) html += ' <span class="git-ahead">↑' + data.ahead + '</span>';
+  if (data.behind > 0) html += ' <span class="git-behind">↓' + data.behind + '</span>';
+  const remote = (data.remote || '').split('\n')[0] || '';
+  const remoteUrl = remote.replace(/^origin\s+/, '').replace(/\s+\(fetch\)$/, '');
+  if (remoteUrl) html += '<div class="git-remote">' + escapeHtml(remoteUrl) + '</div>';
+  html += '</div>';
+  if (data.has_changes) {
+    html += '<div class="git-changes">' + escapeHtml(data.changes) + '</div>';
+    html += '<div class="git-actions">'
+      + '<input id="gitCommitMsg" placeholder="Commit message..." onkeydown="if(event.key===\'Enter\')gitPush()" />'
+      + '<button class="btn" style="font-size:11px;padding:4px 12px" onclick="gitPush()">Push</button></div>';
+  } else {
+    html += '<div style="font-size:12px;color:var(--green);margin-top:4px">✓ Clean — nothing to push</div>';
+  }
+  el.innerHTML = html;
+}
+
+async function gitPush() {
+  const path = projectPaths[activeProject];
+  if (!path) return;
+  const msgInput = document.getElementById('gitCommitMsg');
+  const msg = msgInput ? msgInput.value.trim() : '';
+  const el = document.getElementById('gitStatus');
+  el.innerHTML = '<span style="font-size:12px;color:var(--text2)">Pushing...</span>';
+  const data = await api('/project/' + encodeURIComponent(activeProject) + '/git/push', {
+    method: 'POST',
+    body: JSON.stringify({ path: path, message: msg })
+  });
+  if (data && data.status === 'success') {
+    if (data.pushed) {
+      addMessage('Git push: ' + (data.message || 'done'), 'system');
+    } else {
+      addMessage('Git: ' + (data.message || 'nothing to push'), 'system');
+    }
+  } else {
+    addMessage('Git error (' + (data?.step || '') + '): ' + (data?.error || 'unknown'), 'system');
+  }
+  loadGitStatus();
+}
+
+async function gitInitRepo() {
+  const path = projectPaths[activeProject];
+  if (!path) return;
+  const urlInput = document.getElementById('gitRemoteUrl');
+  const remoteUrl = urlInput ? urlInput.value.trim() : '';
+  const data = await api('/project/' + encodeURIComponent(activeProject) + '/git/init', {
+    method: 'POST',
+    body: JSON.stringify({ path: path, remote_url: remoteUrl })
+  });
+  if (data && data.status === 'success') {
+    addMessage('Git: ' + (data.message || 'initialized') + (data.remote ? ' → ' + data.remote : ''), 'system');
+  } else {
+    addMessage('Git init error: ' + (data?.error || 'unknown'), 'system');
+  }
+  loadGitStatus();
+}
+
 async function loadMemories() {
   const el = document.getElementById('memoryList');
   try {
@@ -1780,6 +1882,7 @@ setInterval(loadStatus, 10000);
 setInterval(loadProcesses, 5000);
 setInterval(loadMemories, 15000);
 loadMemories();
+loadGitStatus();
 </script>
 </body>
 </html>

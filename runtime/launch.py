@@ -10,6 +10,7 @@ import yaml
 import os
 from datetime import datetime
 from pathlib import Path
+import subprocess
 
 from aios.hooks.modules.llm import useCore
 from aios.hooks.modules.memory import useMemoryManager
@@ -801,7 +802,7 @@ async def handle_query(request: QueryRequest):
                                 "memory_type": "task_context",
                             }
                         )
-                        mm.provider.add(note)
+                        mm.provider.add_memory(note)
             except Exception as mem_err:
                 logger.warning(f"Failed to save LLM chat to memory: {mem_err}")
 
@@ -941,7 +942,7 @@ async def orchestrator_plan(req: OrchestratorRequest):
                         "memory_type": "task_context",
                     }
                 )
-                mm.provider.add(note)
+                mm.provider.add_memory(note)
         except Exception:
             pass
         return {"status": "success", "plan": plan}
@@ -985,7 +986,7 @@ async def orchestrator_execute(req: OrchestratorRequest):
                         "memory_type": "task_context",
                     }
                 )
-                mm.provider.add(note)
+                mm.provider.add_memory(note)
         except Exception:
             pass
         return {"status": "success", "plan": result}
@@ -1118,6 +1119,134 @@ async def init_project(req: ProjectInitRequest):
         return {"status": "success", "path": str(p.resolve()), "created": not p.exists() or True}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Cannot create directory: {e}")
+
+
+# --- Git endpoints ---
+
+def _git(args: list, cwd: str, timeout: int = 30) -> dict:
+    """Run a git command and return stdout/stderr/returncode."""
+    try:
+        r = subprocess.run(
+            ["git"] + args,
+            capture_output=True, text=True, timeout=timeout,
+            cwd=cwd, encoding="utf-8", errors="replace",
+        )
+        return {"stdout": r.stdout.strip(), "stderr": r.stderr.strip(), "returncode": r.returncode}
+    except subprocess.TimeoutExpired:
+        return {"stdout": "", "stderr": "git timed out", "returncode": -1}
+    except Exception as e:
+        return {"stdout": "", "stderr": str(e), "returncode": -1}
+
+
+@app.get("/project/{project_id}/git/status")
+async def git_status(project_id: str, request: Request):
+    """Git status for a project directory."""
+    path = request.query_params.get("path", "")
+    if not path or not os.path.isdir(path):
+        raise HTTPException(status_code=400, detail="Invalid project path")
+
+    is_repo = _git(["rev-parse", "--is-inside-work-tree"], path)
+    if is_repo["returncode"] != 0:
+        return {"status": "success", "is_repo": False, "path": path}
+
+    branch = _git(["branch", "--show-current"], path)
+    remote = _git(["remote", "-v"], path)
+    status = _git(["status", "--short"], path)
+    log = _git(["log", "--oneline", "-5"], path)
+    ahead_behind = _git(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"], path)
+
+    ahead, behind = 0, 0
+    if ahead_behind["returncode"] == 0 and ahead_behind["stdout"]:
+        parts = ahead_behind["stdout"].split()
+        if len(parts) == 2:
+            ahead, behind = int(parts[0]), int(parts[1])
+
+    return {
+        "status": "success",
+        "is_repo": True,
+        "path": path,
+        "branch": branch["stdout"],
+        "remote": remote["stdout"],
+        "changes": status["stdout"],
+        "has_changes": bool(status["stdout"]),
+        "recent_commits": log["stdout"],
+        "ahead": ahead,
+        "behind": behind,
+    }
+
+
+class GitPushRequest(BaseModel):
+    path: str
+    message: str = ""
+    files: Optional[list] = None
+
+
+@app.post("/project/{project_id}/git/push")
+async def git_push(project_id: str, req: GitPushRequest):
+    """Stage, commit, and push changes for a project."""
+    if not req.path or not os.path.isdir(req.path):
+        raise HTTPException(status_code=400, detail="Invalid project path")
+
+    is_repo = _git(["rev-parse", "--is-inside-work-tree"], req.path)
+    if is_repo["returncode"] != 0:
+        raise HTTPException(status_code=400, detail="Not a git repository")
+
+    status = _git(["status", "--short"], req.path)
+    if not status["stdout"]:
+        return {"status": "success", "message": "Nothing to commit", "pushed": False}
+
+    if req.files:
+        add = _git(["add"] + req.files, req.path)
+    else:
+        add = _git(["add", "-A"], req.path)
+    if add["returncode"] != 0:
+        return {"status": "error", "step": "add", "error": add["stderr"]}
+
+    msg = req.message or f"Update {project_id} — {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    commit = _git(["commit", "-m", msg], req.path)
+    if commit["returncode"] != 0:
+        return {"status": "error", "step": "commit", "error": commit["stderr"]}
+
+    push = _git(["push"], req.path, timeout=60)
+    if push["returncode"] != 0:
+        return {"status": "error", "step": "push", "error": push["stderr"], "committed": True}
+
+    return {
+        "status": "success",
+        "pushed": True,
+        "message": msg,
+        "commit_output": commit["stdout"],
+        "push_output": push["stdout"] or push["stderr"],
+    }
+
+
+class GitInitRequest(BaseModel):
+    path: str
+    remote_url: str = ""
+
+
+@app.post("/project/{project_id}/git/init")
+async def git_init_repo(project_id: str, req: GitInitRequest):
+    """Initialize a git repo and optionally set remote."""
+    if not req.path or not os.path.isdir(req.path):
+        raise HTTPException(status_code=400, detail="Invalid project path")
+
+    is_repo = _git(["rev-parse", "--is-inside-work-tree"], req.path)
+    if is_repo["returncode"] == 0:
+        if req.remote_url:
+            _git(["remote", "remove", "origin"], req.path)
+            _git(["remote", "add", "origin", req.remote_url], req.path)
+            return {"status": "success", "message": "Remote updated", "remote": req.remote_url}
+        return {"status": "success", "message": "Already a git repo"}
+
+    init = _git(["init"], req.path)
+    if init["returncode"] != 0:
+        return {"status": "error", "error": init["stderr"]}
+
+    if req.remote_url:
+        _git(["remote", "add", "origin", req.remote_url], req.path)
+
+    return {"status": "success", "message": "Git initialized", "remote": req.remote_url or ""}
 
 
 WEBUI_SETTINGS_FILE = Path("webui_settings.json")
