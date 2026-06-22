@@ -1,0 +1,1785 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIOS Web UI</title>
+<style>
+  :root, [data-theme="dark"] {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #242734;
+    --border: #2e3144;
+    --text: #e4e4e7;
+    --text2: #9ca3af;
+    --accent: #6366f1;
+    --accent-hover: #818cf8;
+    --accent2: #e67e22;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+    --msg-user-text: #ffffff;
+    --badge-openai-bg: rgba(16,163,127,0.2);
+    --badge-openai-color: #10a37f;
+    --badge-novita-bg: rgba(234,179,8,0.2);
+    --badge-novita-color: #eab308;
+    --badge-anthropic-bg: rgba(217,119,87,0.2);
+    --badge-anthropic-color: #d97757;
+  }
+  [data-theme="light"] {
+    --bg: #f5f5f7;
+    --surface: #ffffff;
+    --surface2: #f0f0f3;
+    --border: #d4d4d8;
+    --text: #18181b;
+    --text2: #71717a;
+    --accent: #4f46e5;
+    --accent-hover: #6366f1;
+    --accent2: #d35400;
+    --green: #16a34a;
+    --red: #dc2626;
+    --yellow: #ca8a04;
+    --msg-user-text: #ffffff;
+    --badge-openai-bg: rgba(16,163,127,0.12);
+    --badge-openai-color: #0d9468;
+    --badge-novita-bg: rgba(202,138,4,0.12);
+    --badge-novita-color: #a16207;
+    --badge-anthropic-bg: rgba(217,119,87,0.12);
+    --badge-anthropic-color: #b45730;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .header h1 {
+    font-size: 20px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .header h1 span { color: var(--accent); }
+  .status-bar {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .status-dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .status-dot.err { background: var(--red); }
+  .main {
+    display: grid;
+    grid-template-columns: 280px 1fr 300px;
+    height: calc(100vh - 49px);
+  }
+  .sidebar {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    padding: 16px;
+    overflow-y: auto;
+  }
+  .sidebar h3 {
+    font-size: 12px;
+    text-transform: uppercase;
+    color: var(--text2);
+    letter-spacing: 1px;
+    margin-bottom: 12px;
+  }
+  .model-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }
+  .model-card:hover { border-color: var(--accent); }
+  .model-card.selected { border-color: var(--accent); background: rgba(99,102,241,0.1); }
+  .model-card .name { font-size: 14px; font-weight: 500; }
+  .model-card .backend { font-size: 12px; color: var(--text2); margin-top: 2px; }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .badge.agent-badge { background: rgba(99,102,241,0.15); color: var(--accent); font-size: 10px; word-break: break-all; }
+  .remove-agent { cursor: pointer; color: var(--text2); font-size: 18px; line-height: 1; padding: 0 2px; }
+  .remove-agent:hover { color: var(--red); }
+  .badge.openai { background: var(--badge-openai-bg); color: var(--badge-openai-color); }
+  .badge.novita { background: var(--badge-novita-bg); color: var(--badge-novita-color); }
+  .badge.anthropic { background: var(--badge-anthropic-bg); color: var(--badge-anthropic-color); }
+  .chat-area {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .chat-header {
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    font-size: 13px;
+    color: var(--text2);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 40px;
+    flex-shrink: 0;
+  }
+  .chat-header .entity-name { color: var(--accent); font-weight: 600; }
+  .chat-header .project-name { color: var(--text); }
+  .chat-header .spacer { flex: 1; }
+  .chat-header .clear-btn {
+    background: none; border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text2); font-size: 11px; padding: 3px 10px; cursor: pointer;
+    transition: all 0.15s;
+  }
+  .chat-header .clear-btn:hover { border-color: var(--red); color: var(--red); }
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+  }
+  .message {
+    max-width: 80%;
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    border-radius: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 14px;
+  }
+  .theme-toggle {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--text);
+    transition: border-color 0.2s;
+    line-height: 1;
+  }
+  .theme-toggle:hover { border-color: var(--accent); }
+  .message.user {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    margin-left: auto;
+    border-bottom-right-radius: 4px;
+  }
+  .message.agent {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+  }
+  .message.system {
+    background: transparent;
+    color: var(--text2);
+    font-size: 12px;
+    text-align: center;
+    max-width: 100%;
+    width: 100%;
+  }
+  .message .meta {
+    font-size: 11px;
+    color: var(--text2);
+    margin-bottom: 4px;
+  }
+  .input-area {
+    padding: 16px 20px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  .input-area input {
+    flex: 1;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    color: var(--text);
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .input-area input:focus { border-color: var(--accent); }
+  .input-area input::placeholder { color: var(--text2); }
+  .btn {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 20px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s;
+    white-space: nowrap;
+  }
+  .btn:hover { background: var(--accent-hover); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn.secondary {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+  .btn.secondary:hover { border-color: var(--accent); }
+  .right-panel {
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    padding: 16px;
+    overflow-y: auto;
+  }
+  .right-panel h3 {
+    font-size: 12px;
+    text-transform: uppercase;
+    color: var(--text2);
+    letter-spacing: 1px;
+    margin-bottom: 12px;
+  }
+  .collapsible-header {
+    display: flex; align-items: center; cursor: pointer; user-select: none;
+  }
+  .collapsible-header .toggle-arrow {
+    font-size: 10px; margin-right: 6px; transition: transform 0.15s;
+    display: inline-block; color: var(--text2);
+  }
+  .collapsible-header .toggle-arrow.open { transform: rotate(90deg); }
+  .collapsible-body { overflow: hidden; }
+  .collapsible-body.collapsed { display: none; }
+  .processes-summary {
+    font-size: 13px; color: var(--text2); display: flex; align-items: center;
+    justify-content: space-between; gap: 8px;
+  }
+  .processes-summary .count { color: var(--text); font-weight: 500; }
+  .processes-summary .running { color: var(--yellow); }
+  .processes-summary .completed { color: var(--green); }
+  .processes-summary .errors { color: #ef4444; }
+  .simple-modal {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    width: 600px; max-width: 90vw; max-height: 80vh;
+    display: flex; flex-direction: column; overflow: hidden; position: relative;
+  }
+  .simple-modal-header {
+    padding: 16px 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .simple-modal-header h3 { font-size: 15px; margin: 0; text-transform: none; color: var(--text); letter-spacing: 0; }
+  .simple-modal-body { padding: 16px 20px; overflow-y: auto; flex: 1; }
+  .component {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .component:last-child { border-bottom: none; }
+  .component .label { text-transform: capitalize; }
+  .component .val { font-weight: 500; }
+  .component .val.active { color: var(--green); }
+  .component .val.inactive { color: var(--red); }
+  .process-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .process-card .pid { color: var(--accent); font-weight: 600; }
+  .process-card .task { color: var(--text2); margin-top: 4px; font-size: 12px; }
+  .process-card .pstatus {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    margin-top: 4px;
+  }
+  .process-card .pstatus.running { background: rgba(234,179,8,0.2); color: var(--yellow); }
+  .process-card .pstatus.completed { background: rgba(34,197,94,0.2); color: var(--green); }
+  .process-card .pstatus.error, .process-card .pstatus.timeout { background: rgba(239,68,68,0.2); color: #ef4444; }
+  .pipeline { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin: 8px 0; text-align: left; }
+  .pipeline-title { font-weight: 600; margin-bottom: 10px; color: var(--text); display: flex; align-items: center; justify-content: space-between; }
+  .pipeline-btn { background: var(--surface); border: 1px solid var(--border); border-radius: 5px; padding: 3px 10px; font-size: 11px; cursor: pointer; color: var(--text2); transition: all 0.2s; }
+  .pipeline-btn:hover { border-color: var(--accent); color: var(--text); }
+  .pipeline-btn.stop { color: var(--red); border-color: var(--red); }
+  .pipeline-btn.stop:hover { background: var(--red); color: #fff; }
+  .pipeline-btn.retry { color: var(--yellow); }
+  .pipeline-btn.retry:hover { border-color: var(--yellow); color: var(--text); }
+  .step-actions { margin-top: 4px; }
+  .parallel-group { border-left: 2px solid var(--accent); margin-left: 10px; padding-left: 8px; margin-bottom: 4px; }
+  .pipeline-step { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; border-top: 1px solid var(--border); }
+  .pipeline-step:first-of-type { border-top: none; }
+  .step-num { min-width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; flex-shrink: 0; }
+  .step-num.done { background: var(--green); }
+  .step-num.fail { background: #ef4444; }
+  .step-num.wait { background: var(--border); color: var(--text2); }
+  .step-body { flex: 1; min-width: 0; }
+  .step-agent { font-weight: 600; font-size: 12px; color: var(--accent); }
+  .step-task { font-size: 12px; color: var(--text2); margin-top: 2px; }
+  .step-result { font-size: 12px; color: var(--text); margin-top: 6px; white-space: pre-wrap; max-height: 400px; overflow-y: auto; background: var(--bg); padding: 6px 8px; border-radius: 6px; }
+  .mem-item { background: var(--surface2); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; font-size: 12px; border-left: 3px solid var(--accent); }
+  .mem-item .mem-meta { color: var(--text2); font-size: 10px; margin-bottom: 3px; }
+  .mem-item .mem-content { color: var(--text); white-space: pre-wrap; max-height: 80px; overflow-y: auto; }
+  .mem-item .mem-tags { margin-top: 3px; }
+  .mem-item .mem-tags span { background: var(--border); border-radius: 3px; padding: 1px 5px; font-size: 10px; margin-right: 3px; }
+  .section { margin-bottom: 20px; }
+  .loading {
+    display: inline-block;
+    width: 16px; height: 16px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .img-wrap {
+    position: relative;
+    display: inline-block;
+    margin-top: 8px;
+  }
+  .img-dl {
+    position: absolute;
+    bottom: 12px;
+    right: 8px;
+    background: rgba(0,0,0,0.6);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 14px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+  .img-wrap:hover .img-dl { opacity: 1; }
+  .img-dl:hover { background: rgba(0,0,0,0.8); }
+  .chat-img {
+    max-width: 100%;
+    max-height: 400px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+  .chat-img:hover { opacity: 0.85; }
+  .img-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    cursor: zoom-out;
+  }
+  .img-overlay img {
+    max-width: 90vw;
+    max-height: 90vh;
+    border-radius: 8px;
+  }
+  .agent-input {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--text);
+    font-size: 13px;
+    width: 100%;
+    outline: none;
+    margin-bottom: 8px;
+  }
+  .modal-overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.6); z-index: 2000;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .modal-overlay.hidden { display: none; }
+  .modal {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    width: 750px; max-width: 90vw; max-height: 85vh;
+    display: flex; overflow: hidden;
+  }
+  .modal-sidebar {
+    width: 180px; min-width: 180px; background: var(--surface2); border-right: 1px solid var(--border);
+    padding: 16px 0;
+  }
+  .modal-sidebar .modal-nav-item {
+    padding: 10px 20px; cursor: pointer; font-size: 13px; color: var(--text2);
+    transition: all 0.15s; border-left: 3px solid transparent;
+  }
+  .modal-sidebar .modal-nav-item:hover { color: var(--text); background: var(--bg); }
+  .modal-sidebar .modal-nav-item.active {
+    color: var(--accent); border-left-color: var(--accent); background: var(--bg);
+  }
+  .modal-right {
+    flex: 1; display: flex; flex-direction: column; position: relative; min-width: 0;
+  }
+  .modal-body {
+    flex: 1; padding: 24px; overflow-y: auto;
+  }
+  .modal-footer {
+    padding: 12px 24px; border-top: 1px solid var(--border);
+    display: flex; justify-content: flex-end; gap: 8px; background: var(--surface);
+    flex-shrink: 0;
+  }
+  .modal-body h2 { font-size: 18px; margin-bottom: 20px; }
+  .modal-body label { display: block; font-size: 13px; color: var(--text2); margin-bottom: 6px; margin-top: 16px; }
+  .modal-body label:first-of-type { margin-top: 0; }
+  .modal-body input[type="text"], .modal-body select, .modal-body textarea {
+    width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; color: var(--text); font-size: 13px; outline: none; font-family: inherit;
+  }
+  .modal-body input:focus, .modal-body select:focus, .modal-body textarea:focus { border-color: var(--accent); }
+  .modal-body textarea { min-height: 120px; resize: vertical; }
+  .modal-body .toggle-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 0; border-bottom: 1px solid var(--border);
+  }
+  .modal-body .toggle-row .toggle-label { font-size: 13px; }
+  .modal-body .toggle-row .toggle-desc { font-size: 11px; color: var(--text2); margin-top: 2px; }
+  .toggle-switch {
+    position: relative; width: 44px; height: 24px; cursor: pointer;
+  }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-switch .slider {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background: var(--border); border-radius: 24px; transition: 0.2s;
+  }
+  .toggle-switch .slider:before {
+    content: ''; position: absolute; height: 18px; width: 18px;
+    left: 3px; bottom: 3px; background: #fff; border-radius: 50%; transition: 0.2s;
+  }
+  .toggle-switch input:checked + .slider { background: var(--accent); }
+  .toggle-switch input:checked + .slider:before { transform: translateX(20px); }
+  .modal-close {
+    position: absolute; top: 12px; right: 16px; background: none; border: none;
+    color: var(--text2); font-size: 22px; cursor: pointer; line-height: 1;
+  }
+  .modal-close:hover { color: var(--text); }
+  .settings-section { margin-bottom: 16px; }
+  .settings-section-title { font-size: 12px; text-transform: uppercase; color: var(--text2); letter-spacing: 1px; margin-bottom: 8px; }
+  .approval-bar {
+    display: flex; gap: 8px; padding: 12px; background: var(--surface2); border: 1px solid var(--accent2);
+    border-radius: 8px; margin: 8px 0; align-items: center; justify-content: space-between;
+  }
+  .approval-bar .approval-text { font-size: 13px; color: var(--text); }
+  .approval-bar .btn-approve { background: var(--green); }
+  .approval-bar .btn-approve:hover { background: #16a34a; }
+  .approval-bar .btn-reject { background: var(--red); }
+  .approval-bar .btn-reject:hover { background: #dc2626; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1 id="systemTitle"><span>AIOS</span> Web UI</h1>
+  <div class="status-bar">
+    <span class="status-dot" id="statusDot"></span>
+    <span id="statusText" style="font-size:13px;color:var(--text2)">Connecting...</span>
+    <button class="btn secondary" onclick="refreshAll()" style="padding:6px 12px;font-size:12px">Refresh</button>
+    <button class="btn secondary" onclick="restartKernel()" style="padding:6px 12px;font-size:12px;color:var(--yellow)" id="restartBtn">Restart Kernel</button>
+    <button class="theme-toggle" onclick="openSettings()" title="Settings">&#9881;</button>
+    <button class="theme-toggle" onclick="toggleTheme()" id="themeBtn" title="Switch theme">&#9790;</button>
+  </div>
+</div>
+
+<div class="main">
+  <div class="sidebar">
+    <div class="section">
+      <h3>Project</h3>
+      <div id="projectsList"></div>
+      <div style="display:flex;flex-direction:column;gap:4px;margin-top:8px">
+        <input class="agent-input" id="addProjectInput" placeholder="project name..." style="margin:0" onkeydown="if(event.key==='Enter')document.getElementById('addProjectPath').focus()">
+        <div style="display:flex;gap:4px">
+          <input class="agent-input" id="addProjectPath" placeholder="C:\path\to\project" style="margin:0;flex:1;font-size:11px" onkeydown="if(event.key==='Enter')addProject()">
+          <button class="btn" onclick="addProject()" style="padding:6px 10px;font-size:18px;line-height:1" title="Add project">+</button>
+        </div>
+      </div>
+    </div>
+    <div class="section">
+      <h3>MCP Tools <span id="mcpCount" style="font-size:11px;color:var(--text2)"></span></h3>
+      <div id="mcpList" style="font-size:12px"></div>
+    </div>
+    <div class="section">
+      <h3>Orchestrator</h3>
+      <div id="orchestratorCard"></div>
+    </div>
+    <div class="section">
+      <h3>LLM Models</h3>
+      <div id="modelsList"></div>
+    </div>
+    <div class="section">
+      <h3>Agents</h3>
+      <div id="agentsList"></div>
+      <div style="display:flex;gap:4px;margin-top:8px">
+        <input class="agent-input" id="addAgentInput" placeholder="agent_id..." style="margin:0;flex:1" onkeydown="if(event.key==='Enter')addAgent()">
+        <button class="btn" onclick="addAgent()" style="padding:6px 10px;font-size:18px;line-height:1" title="Add agent">+</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="chat-area">
+    <div class="chat-header" id="chatHeader">
+      <span class="project-name" id="chatProject">global</span>
+      <span style="color:var(--border)">&gt;</span>
+      <span class="entity-name" id="chatEntity">Select an agent or LLM</span>
+      <span class="spacer"></span>
+      <button class="clear-btn" id="clearChatBtn" onclick="clearCurrentChat()" style="display:none" title="Clear chat history">Clear</button>
+    </div>
+    <div class="messages" id="messages">
+      <div class="message system">Select a project, then click an agent or LLM model to start chatting.</div>
+    </div>
+    <div class="input-area">
+      <input id="chatInput" placeholder="Select an agent or LLM first..." onkeydown="if(event.key==='Enter' && !event.shiftKey)sendChat()" disabled>
+      <button class="btn" onclick="sendChat()" id="sendBtn" disabled>Send</button>
+    </div>
+  </div>
+
+  <div class="right-panel">
+    <div class="section">
+      <div class="collapsible-header" onclick="toggleCollapsible('kernelComponents')">
+        <span class="toggle-arrow" id="kernelComponentsArrow">&#9654;</span>
+        <h3 style="margin-bottom:0">Kernel Components</h3>
+      </div>
+      <div class="collapsible-body collapsed" id="kernelComponentsBody">
+        <div id="componentsList" style="margin-top:12px"></div>
+      </div>
+    </div>
+    <div class="section">
+      <h3>Agent Processes</h3>
+      <div id="processSummary" class="processes-summary">
+        <span style="color:var(--text2)">No processes</span>
+      </div>
+    </div>
+    <div class="section">
+      <h3>Memory Log <button class="btn" onclick="loadMemories()" style="font-size:10px;padding:2px 8px;margin-left:8px">Refresh</button></h3>
+      <div id="memoryList"><span style="font-size:13px;color:var(--text2)">No memories yet</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Modal -->
+<div class="modal-overlay hidden" id="settingsModal" onclick="if(event.target===this)closeSettings()">
+  <div class="modal">
+    <div class="modal-sidebar">
+      <div class="modal-nav-item active" onclick="switchSettingsTab('general')" id="navGeneral">General</div>
+      <div class="modal-nav-item" onclick="switchSettingsTab('orchestrator')" id="navOrchestrator">Orchestrator</div>
+    </div>
+    <div class="modal-right">
+      <button class="modal-close" onclick="closeSettings()">&times;</button>
+      <div class="modal-body" id="settingsBody"></div>
+      <div class="modal-footer">
+        <button class="btn secondary" onclick="closeSettings()">Cancel</button>
+        <button class="btn" onclick="saveAndCloseSettings()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="processesModal" onclick="if(event.target===this)closeProcessesModal()">
+  <div class="simple-modal">
+    <div class="simple-modal-header">
+      <h3>Agent Processes</h3>
+      <button class="modal-close" onclick="closeProcessesModal()">&times;</button>
+    </div>
+    <div class="simple-modal-body" id="processesModalBody">
+      <span style="font-size:13px;color:var(--text2)">No processes</span>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = 'http://localhost:8000';
+const CHAT_STORAGE_KEY = 'aios_chat_histories';
+const MAX_CONTEXT_MESSAGES = 20;
+
+let registeredAgents = [];
+let settingsLoaded = false;
+let activeProject = 'global';
+let projects = ['global'];
+let projectPaths = {};
+let allMcpServers = [];
+let projectMcpBindings = {};
+let availableModels = [];
+
+// Active entity: { type: 'agent'|'llm'|'orchestrator', id: '...' }
+let activeEntity = null;
+
+// Chat histories: { "project::entity_key": [ {role, text, meta, isHtml, timestamp} ] }
+let chatHistories = {};
+
+function entityKey(entity) {
+  if (!entity) return null;
+  if (entity.type === 'orchestrator') return 'orchestrator';
+  if (entity.type === 'llm') return 'llm::' + entity.id + '::' + entity.provider;
+  return 'agent::' + entity.id;
+}
+
+function chatKey() {
+  if (!activeEntity) return null;
+  return activeProject + '::' + entityKey(activeEntity);
+}
+
+function entityDisplayName(entity) {
+  if (!entity) return 'Select an entity';
+  if (entity.type === 'orchestrator') return 'Orchestrator';
+  if (entity.type === 'agent') {
+    return (entity.id.includes('/') ? entity.id.split('/').pop() : entity.id);
+  }
+  return entity.id + ' (' + entity.provider + ')';
+}
+
+// --- Persistence ---
+
+function loadChatHistories() {
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+    if (raw) chatHistories = JSON.parse(raw);
+  } catch(e) { chatHistories = {}; }
+}
+
+function saveChatHistories() {
+  try {
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(chatHistories));
+  } catch(e) {}
+}
+
+function getCurrentHistory() {
+  const key = chatKey();
+  if (!key) return [];
+  if (!chatHistories[key]) chatHistories[key] = [];
+  return chatHistories[key];
+}
+
+function writeToEntityChat(entityObj, project, text, role, meta) {
+  const ek = entityObj.type === 'orchestrator' ? 'orchestrator'
+    : entityObj.type === 'llm' ? 'llm::' + entityObj.id + '::' + entityObj.provider
+    : 'agent::' + entityObj.id;
+  const key = project + '::' + ek;
+  if (!chatHistories[key]) chatHistories[key] = [];
+  chatHistories[key].push({ role, text, meta: meta || '', isHtml: false, timestamp: Date.now() });
+  saveChatHistories();
+}
+
+// --- API ---
+
+async function api(path, opts = {}) {
+  try {
+    const r = await fetch(API + path, {
+      headers: { 'Content-Type': 'application/json' },
+      ...opts
+    });
+    return await r.json();
+  } catch (e) {
+    console.error('API error:', path, e);
+    return null;
+  }
+}
+
+// --- Chat rendering ---
+
+function renderChat() {
+  const el = document.getElementById('messages');
+  const history = getCurrentHistory();
+  const headerProject = document.getElementById('chatProject');
+  const headerEntity = document.getElementById('chatEntity');
+  const input = document.getElementById('chatInput');
+  const sendBtn = document.getElementById('sendBtn');
+
+  headerProject.textContent = activeProject;
+  headerEntity.textContent = entityDisplayName(activeEntity);
+  document.getElementById('clearChatBtn').style.display = activeEntity ? '' : 'none';
+
+  if (!activeEntity) {
+    el.innerHTML = '<div class="message system">Select a project, then click an agent or LLM model to start chatting.</div>';
+    input.disabled = true;
+    input.placeholder = 'Select an agent or LLM first...';
+    sendBtn.disabled = true;
+    return;
+  }
+
+  input.disabled = false;
+  sendBtn.disabled = false;
+  input.placeholder = 'Chat with ' + entityDisplayName(activeEntity) + '...';
+
+  if (history.length === 0) {
+    el.innerHTML = '<div class="message system">Chat with ' + escapeHtml(entityDisplayName(activeEntity)) + ' in project ' + escapeHtml(activeProject) + '</div>';
+    return;
+  }
+
+  el.innerHTML = history.map(msg => {
+    const metaHtml = msg.meta ? '<div class="meta">' + escapeHtml(msg.meta) + '</div>' : '';
+    if (msg.isHtml) {
+      return '<div class="message ' + msg.role + '">' + metaHtml + msg.text + '</div>';
+    }
+    const images = extractImages(msg.text);
+    if (images.length > 0) {
+      const textPart = images.reduce((t, img) => t.replace(img.raw, '').trim(), msg.text);
+      return '<div class="message ' + msg.role + '">' + metaHtml
+        + (textPart ? escapeHtml(textPart) + '<br>' : '')
+        + images.map(img => '<div class="img-wrap"><img src="' + escapeHtml(img.src) + '" class="chat-img" onclick="openImage(this.src)" alt="image"><button class="img-dl" onclick="downloadImage(\'' + escapeHtml(img.src) + '\')" title="Download">&#11015;</button></div>').join('')
+        + '</div>';
+    }
+    return '<div class="message ' + msg.role + '">' + metaHtml + escapeHtml(msg.text) + '</div>';
+  }).join('');
+
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearCurrentChat() {
+  const key = chatKey();
+  if (!key) return;
+  if (!confirm('Clear chat history? Memory data will not be affected.')) return;
+  chatHistories[key] = [];
+  saveChatHistories();
+  renderChat();
+}
+
+function addMessage(text, role = 'system', meta = '', isHtml = false) {
+  if (activeEntity) {
+    const history = getCurrentHistory();
+    history.push({ role, text, meta: meta || '', isHtml, timestamp: Date.now() });
+    saveChatHistories();
+  }
+  // Render into DOM
+  const div = document.createElement('div');
+  div.className = 'message ' + role;
+  const metaHtml = meta ? '<div class="meta">' + escapeHtml(meta) + '</div>' : '';
+  if (isHtml) {
+    div.innerHTML = metaHtml + text;
+  } else {
+    const images = extractImages(text);
+    if (images.length > 0) {
+      const textPart = images.reduce((t, img) => t.replace(img.raw, '').trim(), text);
+      div.innerHTML = metaHtml
+        + (textPart ? escapeHtml(textPart) + '<br>' : '')
+        + images.map(img => '<div class="img-wrap"><img src="' + escapeHtml(img.src) + '" class="chat-img" onclick="openImage(this.src)" alt="image"><button class="img-dl" onclick="downloadImage(\'' + escapeHtml(img.src) + '\')" title="Download">&#11015;</button></div>').join('');
+    } else if (meta) {
+      div.innerHTML = metaHtml + escapeHtml(text);
+    } else {
+      div.textContent = text;
+    }
+  }
+  document.getElementById('messages').appendChild(div);
+  div.scrollIntoView({ behavior: 'smooth' });
+}
+
+function getContextMessages() {
+  const history = getCurrentHistory();
+  const contextMsgs = [];
+  for (const msg of history.slice(-MAX_CONTEXT_MESSAGES)) {
+    if (msg.role === 'user') contextMsgs.push({ role: 'user', content: msg.text });
+    else if (msg.role === 'agent') contextMsgs.push({ role: 'assistant', content: msg.text });
+  }
+  return contextMsgs;
+}
+
+// --- Entity selection ---
+
+function selectEntity(entity) {
+  if (activeEntity && entityKey(activeEntity) === entityKey(entity)) {
+    activeEntity = null;
+  } else {
+    activeEntity = entity;
+  }
+  renderModels();
+  renderAgents();
+  renderOrchestrator();
+  renderChat();
+}
+
+// --- Orchestrator ---
+
+function renderOrchestrator() {
+  const el = document.getElementById('orchestratorCard');
+  const isActive = activeEntity && activeEntity.type === 'orchestrator';
+  el.innerHTML = '<div class="model-card ' + (isActive ? 'selected' : '') + '" onclick="selectEntity({type:\'orchestrator\',id:\'orchestrator\'})" style="border-left:3px solid var(--accent2)">'
+    + '<div class="name" style="color:var(--accent2)">Orchestrator</div>'
+    + '<div class="backend" style="font-size:11px;color:var(--text2)">Auto-plan & execute with agents</div>'
+    + '</div>';
+}
+
+// --- Models ---
+
+async function loadModels() {
+  const data = await api('/core/llms/list');
+  if (!data || !data.llms) return;
+  availableModels = data.llms;
+  renderModels();
+}
+
+function renderModels() {
+  const el = document.getElementById('modelsList');
+  el.innerHTML = availableModels.map(m => {
+    const isActive = activeEntity && activeEntity.type === 'llm' && activeEntity.id === m.name && activeEntity.provider === m.backend;
+    return '<div class="model-card ' + (isActive ? 'selected' : '') + '" onclick="selectEntity({type:\'llm\',id:\'' + escapeHtml(m.name) + '\',provider:\'' + escapeHtml(m.backend) + '\'})">'
+      + '<div class="name">' + escapeHtml(m.name) + '</div>'
+      + '<div class="backend"><span class="badge ' + m.backend + '">' + m.backend + '</span></div>'
+      + '</div>';
+  }).join('');
+}
+
+// --- Agents ---
+
+function renderAgents() {
+  const el = document.getElementById('agentsList');
+  if (!registeredAgents.length) { el.innerHTML = '<span style="font-size:12px;color:var(--text2)">No agents</span>'; return; }
+  el.innerHTML = registeredAgents.map(id => {
+    const isActive = activeEntity && activeEntity.type === 'agent' && activeEntity.id === id;
+    const name = id.includes('/') ? id.split('/').pop() : id;
+    return '<div class="model-card ' + (isActive ? 'selected' : '') + '" onclick="selectEntity({type:\'agent\',id:\'' + escapeHtml(id) + '\'})">'
+      + '<div class="name">' + escapeHtml(name) + '</div>'
+      + '<div class="backend" style="display:flex;justify-content:space-between;align-items:center">'
+      + '<span class="badge agent-badge">' + escapeHtml(id) + '</span>'
+      + '<span class="remove-agent" onclick="event.stopPropagation();removeAgent(\'' + escapeHtml(id) + '\')" title="Remove">&times;</span>'
+      + '</div></div>';
+  }).join('');
+}
+
+function addAgent() {
+  const input = document.getElementById('addAgentInput');
+  const id = input.value.trim();
+  if (!id || registeredAgents.includes(id)) { input.value = ''; return; }
+  registeredAgents.push(id);
+  saveSettings();
+  renderAgents();
+  input.value = '';
+}
+
+function removeAgent(id) {
+  registeredAgents = registeredAgents.filter(a => a !== id);
+  if (activeEntity && activeEntity.type === 'agent' && activeEntity.id === id) activeEntity = null;
+  saveSettings();
+  renderAgents();
+  renderChat();
+}
+
+// --- Projects ---
+
+function renderProjects() {
+  const el = document.getElementById('projectsList');
+  el.innerHTML = projects.map(p => {
+    const sel = activeProject === p;
+    const isGlobal = p === 'global';
+    const path = projectPaths[p] || '';
+    return '<div class="model-card ' + (sel ? 'selected' : '') + '" onclick="selectProject(\'' + escapeHtml(p) + '\')">'
+      + '<div class="name">' + escapeHtml(p) + '</div>'
+      + (path ? '<div style="font-size:10px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeHtml(path) + '">' + escapeHtml(path) + '</div>' : '')
+      + (isGlobal ? '' : '<span class="remove-agent" onclick="event.stopPropagation();removeProject(\'' + escapeHtml(p) + '\')" title="Remove">&times;</span>')
+      + '</div>';
+  }).join('');
+}
+
+function selectProject(name) {
+  activeProject = name;
+  renderProjects();
+  saveSettings();
+  renderChat();
+  loadMcpForProject();
+  loadMemories();
+}
+
+async function addProject() {
+  const input = document.getElementById('addProjectInput');
+  const pathInput = document.getElementById('addProjectPath');
+  const name = input.value.trim().toLowerCase().replace(/\s+/g, '_');
+  const path = pathInput.value.trim();
+  if (!name || projects.includes(name)) { input.value = ''; return; }
+  if (!path) { pathInput.focus(); return; }
+  const result = await api('/project/init', { method: 'POST', body: JSON.stringify({ path: path }) });
+  if (!result || result.status !== 'success') {
+    addMessage('Error: ' + (result?.detail || 'Failed to create directory'), 'system');
+    return;
+  }
+  const resolvedPath = result.path || path;
+  projects.push(name);
+  projectPaths[name] = resolvedPath;
+  activeProject = name;
+  saveSettings();
+  renderProjects();
+  input.value = '';
+  pathInput.value = '';
+  renderChat();
+  loadMcpForProject();
+}
+
+function removeProject(name) {
+  if (name === 'global') return;
+  projects = projects.filter(p => p !== name);
+  delete projectPaths[name];
+  if (activeProject === name) activeProject = 'global';
+  saveSettings();
+  renderProjects();
+  renderChat();
+}
+
+// --- MCP ---
+
+async function loadMcpForProject() {
+  const el = document.getElementById('mcpList');
+  const countEl = document.getElementById('mcpCount');
+  el.innerHTML = '<span style="color:var(--text2)">loading...</span>';
+  try {
+    const [allData, bindData] = await Promise.all([
+      api('/mcp/list'),
+      api('/mcp/project/' + encodeURIComponent(activeProject) + '/bindings')
+    ]);
+    allMcpServers = allData && allData.servers ? Object.keys(allData.servers) : [];
+    const bound = bindData && bindData.servers ? bindData.servers : [];
+    projectMcpBindings[activeProject] = bound;
+    if (!allMcpServers.length) {
+      el.innerHTML = '<span style="color:var(--text2)">No MCP servers</span>';
+      countEl.textContent = '';
+      return;
+    }
+    el.innerHTML = allMcpServers.map(srv => {
+      const checked = bound.includes(srv);
+      return '<label style="display:flex;align-items:center;gap:6px;padding:4px 0;cursor:pointer">'
+        + '<input type="checkbox" ' + (checked ? 'checked' : '') + ' onchange="toggleMcpBinding(\'' + escapeHtml(srv) + '\', this.checked)">'
+        + '<span>' + escapeHtml(srv) + '</span></label>';
+    }).join('');
+    countEl.textContent = '(' + bound.length + '/' + allMcpServers.length + ')';
+  } catch(e) {
+    el.innerHTML = '<span style="color:var(--text2)">MCP unavailable</span>';
+    countEl.textContent = '';
+  }
+}
+
+async function toggleMcpBinding(server, enabled) {
+  let bound = projectMcpBindings[activeProject] || [];
+  if (enabled && !bound.includes(server)) bound.push(server);
+  if (!enabled) bound = bound.filter(s => s !== server);
+  projectMcpBindings[activeProject] = bound;
+  await api('/mcp/project/' + encodeURIComponent(activeProject) + '/bind', {
+    method: 'POST',
+    body: JSON.stringify({ servers: bound })
+  });
+  document.getElementById('mcpCount').textContent = '(' + bound.length + '/' + allMcpServers.length + ')';
+}
+
+// --- Settings ---
+
+function saveSettings() {
+  const settings = {
+    agents: registeredAgents,
+    theme: document.documentElement.getAttribute('data-theme') || 'dark',
+    projects: projects,
+    projectPaths: projectPaths,
+    activeProject: activeProject,
+    activeEntity: activeEntity,
+  };
+  api('/webui/settings', { method: 'POST', body: JSON.stringify(settings) });
+}
+
+async function loadSettings() {
+  const data = await api('/webui/settings');
+  if (data && data.agents) {
+    registeredAgents = data.agents;
+  }
+  if (data && data.theme) {
+    document.documentElement.setAttribute('data-theme', data.theme);
+    document.getElementById('themeBtn').innerHTML = data.theme === 'dark' ? '&#9790;' : '&#9728;';
+  }
+  if (data && data.projects) {
+    projects = data.projects;
+    if (!projects.includes('global')) projects.unshift('global');
+  }
+  if (data && data.projectPaths) projectPaths = data.projectPaths;
+  if (data && data.activeProject) activeProject = data.activeProject;
+  if (data && data.activeEntity) activeEntity = data.activeEntity;
+  renderProjects();
+  loadMcpForProject();
+  settingsLoaded = true;
+  await syncAgentsFromKernel();
+  renderChat();
+}
+
+async function syncAgentsFromKernel() {
+  try {
+    const data = await api('/agents/roles');
+    if (data && data.agents) {
+      for (const a of data.agents) {
+        if (a.agent_id && !registeredAgents.includes(a.agent_id)) {
+          registeredAgents.push(a.agent_id);
+        }
+      }
+      renderAgents();
+      saveSettings();
+    }
+  } catch(e) {}
+}
+
+// --- Send ---
+
+async function sendChat() {
+  const input = document.getElementById('chatInput');
+  const text = input.value.trim();
+  if (!text || !activeEntity) return;
+  input.value = '';
+
+  if (activeEntity.type === 'orchestrator') {
+    submitOrchestrator(text);
+  } else if (activeEntity.type === 'agent') {
+    submitAgentTask(activeEntity.id, text);
+  } else if (activeEntity.type === 'llm') {
+    submitLLMChat(text);
+  }
+}
+
+async function submitAgentTask(agentId, task) {
+  const agentName = agentId.includes('/') ? agentId.split('/').pop() : agentId;
+  addMessage(task, 'user', aiosSettings.userName || 'You');
+
+  const contextMsgs = getContextMessages();
+  let contextBlock = '';
+  if (contextMsgs.length > 1) {
+    const prev = contextMsgs.slice(0, -1);
+    contextBlock = prev.map(m => (m.role === 'user' ? 'User' : 'Assistant') + ': ' + m.content).join('\n');
+  }
+  const fullTask = contextBlock ? 'Conversation history:\n' + contextBlock + '\n\nCurrent task: ' + task : task;
+
+  const data = await api('/agents/submit', {
+    method: 'POST',
+    body: JSON.stringify({
+      agent_id: agentId,
+      agent_config: { task: fullTask, project_id: activeProject, project_path: projectPaths[activeProject] || '' }
+    })
+  });
+
+  if (data && data.status === 'success') {
+    addMessage('Execution ID: ' + data.execution_id, 'system');
+    pollAgentStatus(data.execution_id, agentName);
+  } else {
+    const err = data?.detail?.message || data?.detail || 'Failed to submit agent';
+    addMessage('Error: ' + (typeof err === 'object' ? JSON.stringify(err) : err), 'system');
+  }
+  loadProcesses();
+}
+
+async function submitLLMChat(text) {
+  const modelName = activeEntity.id;
+  addMessage(text, 'user', aiosSettings.userName || 'You');
+
+  const messages = getContextMessages();
+
+  const selModel = { name: activeEntity.id, provider: activeEntity.provider };
+  await api('/user/select/llms', {
+    method: 'POST',
+    body: JSON.stringify([selModel])
+  });
+
+  const data = await api('/query', {
+    method: 'POST',
+    body: JSON.stringify({
+      agent_name: 'webui_user',
+      query_type: 'llm',
+      project_id: activeProject,
+      query_data: {
+        messages: messages,
+        action_type: 'chat',
+        llms: [selModel]
+      }
+    })
+  });
+
+  if (data && data.response) {
+    addMessage(extractResponse(data.response), 'agent', modelName);
+  } else if (data && data.detail) {
+    addMessage('Error: ' + (typeof data.detail === 'object' ? JSON.stringify(data.detail) : data.detail), 'system');
+  } else if (data) {
+    addMessage(extractResponse(data), 'agent', modelName);
+  } else {
+    addMessage('No response from server', 'system');
+  }
+}
+
+async function pollAgentStatus(execId, agentName) {
+  let attempts = 0;
+  const poll = async () => {
+    attempts++;
+    const data = await api('/agents/' + execId + '/status');
+    if (!data) return;
+    if (data.status === 'completed') {
+      const result = extractResponse(data.result);
+      addMessage(result, 'agent', agentName);
+      loadProcesses();
+    } else if (data.status === 'running' && attempts < 60) {
+      setTimeout(poll, 2000);
+    } else if (data.status === 'error' || attempts >= 60) {
+      const errMsg = data?.detail?.message || 'Agent timed out or errored';
+      addMessage(errMsg, 'system');
+      loadProcesses();
+    }
+  };
+  setTimeout(poll, 2000);
+}
+
+// --- Orchestrate ---
+
+// Global pipeline state for cancel/retry
+let activePipeline = null;
+
+async function submitOrchestrator(text) {
+  addMessage(text, 'user', aiosSettings.userName || 'You');
+
+  const contextMsgs = getContextMessages();
+  let contextBlock = '';
+  if (contextMsgs.length > 1) {
+    const prev = contextMsgs.slice(0, -1);
+    contextBlock = prev.map(m => (m.role === 'user' ? 'User' : 'Orchestrator') + ': ' + m.content).join('\n');
+  }
+
+  let memoryContext = '';
+  try {
+    const memData = await api('/memory/list?user_id=' + encodeURIComponent(activeProject));
+    if (memData && memData.memories && memData.memories.length) {
+      const lines = memData.memories.slice(0, 10).map(m => {
+        const owner = (m.metadata || {}).owner_agent || '?';
+        return '[' + owner + ']: ' + (m.content || '').slice(0, 300);
+      });
+      memoryContext = lines.join('\n');
+    }
+  } catch(e) {}
+
+  let fullContext = '';
+  if (contextBlock) fullContext += 'Chat history:\n' + contextBlock + '\n\n';
+  if (memoryContext) fullContext += 'Project memory (what agents/LLM have done):\n' + memoryContext;
+
+  const pipelineId = 'pipeline-' + Date.now();
+  addMessage('<div class="pipeline" id="' + pipelineId + '"><div class="pipeline-title">Orchestrator: planning...</div></div>', 'system', null, true);
+
+  const path = projectPaths[activeProject] || '';
+  // Build request with orchestrator settings
+  const orcReq = { task: text, project_id: activeProject, project_path: path, context: fullContext };
+  if (aiosSettings.orchestrator.model) orcReq.model = aiosSettings.orchestrator.model;
+  if (aiosSettings.orchestrator.provider) orcReq.provider = aiosSettings.orchestrator.provider;
+  if (aiosSettings.orchestrator.systemPrompt) {
+    orcReq.system_prompt = aiosSettings.orchestrator.systemPrompt;
+  }
+
+  const planData = await api('/orchestrator/plan', {
+    method: 'POST',
+    body: JSON.stringify(orcReq)
+  });
+
+  if (!planData || planData.status !== 'success' || !planData.plan || !planData.plan.steps) {
+    const err = planData?.detail?.error || planData?.detail || 'Planning failed';
+    document.getElementById(pipelineId).innerHTML = '<div class="pipeline-title"><span>Plan failed</span></div><div style="color:#ef4444;font-size:12px">' + escapeHtml(typeof err === 'object' ? JSON.stringify(err) : err) + '</div>';
+    return;
+  }
+
+  const plan = planData.plan;
+  const steps = plan.steps;
+  const results = {};
+
+  const planSummary = steps.map(s => {
+    const agentName = s.agent_id.includes('/') ? s.agent_id.split('/').pop() : s.agent_id;
+    return 'Step ' + s.step + ': ' + agentName + ' — ' + s.subtask;
+  }).join('\n');
+  addMessage('Plan:\n' + planSummary, 'agent', 'Orchestrator');
+
+  // Approval gate
+  if (aiosSettings.orchestrator.requireApproval) {
+    const approvalId = 'approval-' + Date.now();
+    addMessage('<div class="approval-bar" id="' + approvalId + '">'
+      + '<span class="approval-text">Approve this plan?</span>'
+      + '<div style="display:flex;gap:6px">'
+      + '<button class="btn btn-approve" onclick="approvePlan(\'' + approvalId + '\',true)">Approve</button>'
+      + '<button class="btn btn-reject" onclick="approvePlan(\'' + approvalId + '\',false)">Reject</button>'
+      + '</div></div>', 'system', null, true);
+
+    // Wait for approval
+    const approved = await new Promise(resolve => {
+      window._pendingApproval = resolve;
+    });
+    delete window._pendingApproval;
+
+    if (!approved) {
+      addMessage('Plan rejected.', 'system');
+      document.getElementById(pipelineId).innerHTML = '<div class="pipeline-title"><span>Pipeline: cancelled by user</span></div>';
+      return;
+    }
+  }
+
+  // Pipeline state object
+  activePipeline = { id: pipelineId, steps, results, cancelled: false, path, task: text };
+
+  function renderPipeline() {
+    const pl = activePipeline;
+    if (!pl) return;
+    const isRunning = pl.steps.some(s => s.status === 'running');
+    const hasFailed = pl.steps.some(s => s.status === 'error' || s.status === 'timeout');
+    const isDone = pl.steps.every(s => s.status === 'completed' || s.status === 'error' || s.status === 'timeout' || s.status === 'cancelled');
+
+    let titleRight = '';
+    if (isRunning) {
+      titleRight = '<button class="pipeline-btn stop" onclick="cancelPipeline()">Stop</button>';
+    }
+    let html = '<div class="pipeline-title"><span>Pipeline: ' + pl.steps.length + ' step(s)' + (pl.cancelled ? ' [CANCELLED]' : '') + '</span>' + titleRight + '</div>';
+
+    // Group steps by dependency level for parallel visualization
+    for (const s of pl.steps) {
+      const st = s.status || 'wait';
+      const numCls = st === 'completed' ? 'done' : (st === 'error' || st === 'timeout' || st === 'cancelled') ? 'fail' : st === 'running' ? '' : 'wait';
+      const agentName = s.agent_id.includes('/') ? s.agent_id.split('/').pop() : s.agent_id;
+      const isParallel = s._parallel;
+      html += '<div class="pipeline-step' + (isParallel ? ' parallel-group' : '') + '">';
+      html += '<div class="step-num ' + numCls + '">' + s.step + '</div>';
+      html += '<div class="step-body">';
+      html += '<div class="step-agent">' + escapeHtml(agentName) + ' <span style="font-weight:400;color:var(--text2)">(' + st + (isParallel ? ', parallel' : '') + ')</span></div>';
+      html += '<div class="step-task">' + escapeHtml(s.subtask) + '</div>';
+      if (s.result) html += '<div class="step-result">' + escapeHtml(s.result) + '</div>';
+      if ((st === 'error' || st === 'timeout') && isDone) {
+        html += '<div class="step-actions"><button class="pipeline-btn retry" onclick="retryStep(' + s.step + ')">Retry</button></div>';
+      }
+      html += '</div></div>';
+    }
+    const el = document.getElementById(pl.id);
+    if (el) el.innerHTML = html;
+  }
+
+  // Build dependency graph: which steps can run in parallel
+  function getReadySteps(steps, results) {
+    const ready = [];
+    for (const s of steps) {
+      if (s.status && s.status !== 'wait') continue;
+      const deps = s.depends_on || [];
+      const allDepsDone = deps.every(d => results[d] !== undefined);
+      if (allDepsDone) ready.push(s);
+    }
+    return ready;
+  }
+
+  // Execute a single step, returns when done
+  async function executeStep(step) {
+    const pl = activePipeline;
+    step.status = 'running';
+    renderPipeline();
+
+    const agentEntity = { type: 'agent', id: step.agent_id };
+
+    const contextParts = [];
+    for (const dep of (step.depends_on || [])) {
+      if (pl.results[dep]) contextParts.push('[Step ' + dep + ' result]: ' + pl.results[dep].slice(0, 1000));
+    }
+    let fullTask = step.subtask;
+    if (contextParts.length) fullTask = 'Previous results:\n' + contextParts.join('\n') + '\n\nYour task: ' + step.subtask;
+
+    // Write task to agent's chat
+    writeToEntityChat(agentEntity, activeProject, step.subtask, 'user', 'from Orchestrator');
+
+    const submitData = await api('/agents/submit', {
+      method: 'POST',
+      body: JSON.stringify({ agent_id: step.agent_id, agent_config: { task: fullTask, project_id: activeProject, project_path: pl.path } })
+    });
+    if (!submitData || submitData.status !== 'success') {
+      step.status = 'error'; step.result = 'Submit failed';
+      writeToEntityChat(agentEntity, activeProject, 'Submit failed', 'system', 'Orchestrator');
+      renderPipeline(); return;
+    }
+    const execId = submitData.execution_id;
+    for (let i = 0; i < 120; i++) {
+      if (pl.cancelled) { step.status = 'cancelled'; step.result = 'Cancelled'; renderPipeline(); return; }
+      await new Promise(r => setTimeout(r, 3000));
+      const statusData = await api('/agents/' + execId + '/status');
+      if (statusData && statusData.status === 'completed') {
+        const res = statusData.result;
+        step.result = typeof res === 'object' ? (res.result || JSON.stringify(res)) : String(res);
+        step.status = 'completed'; pl.results[step.step] = step.result;
+        // Write result to agent's chat
+        writeToEntityChat(agentEntity, activeProject, step.result, 'agent', step.agent_id.includes('/') ? step.agent_id.split('/').pop() : step.agent_id);
+        renderPipeline(); return;
+      } else if (statusData && statusData.status === 'error') {
+        step.status = 'error'; step.result = 'Agent error';
+        writeToEntityChat(agentEntity, activeProject, 'Agent error', 'system', 'Orchestrator');
+        renderPipeline(); return;
+      }
+    }
+    step.status = 'timeout'; step.result = 'Timed out';
+    writeToEntityChat(agentEntity, activeProject, 'Timed out', 'system', 'Orchestrator');
+    renderPipeline();
+  }
+
+  // Main execution loop with parallel support
+  renderPipeline();
+  while (!activePipeline.cancelled) {
+    const ready = getReadySteps(steps, results);
+    if (ready.length === 0) break;
+
+    if (ready.length === 1) {
+      await executeStep(ready[0]);
+    } else {
+      // Mark parallel steps
+      ready.forEach(s => { s._parallel = true; });
+      renderPipeline();
+      await Promise.all(ready.map(s => executeStep(s)));
+    }
+  }
+
+  const completedCount = steps.filter(s => s.status === 'completed').length;
+  const status = activePipeline.cancelled ? 'Cancelled' : 'Done';
+  addMessage(status + ': ' + completedCount + '/' + steps.length + ' steps completed.', 'agent', 'Orchestrator');
+  renderPipeline();
+  loadProcesses();
+}
+
+function approvePlan(approvalId, approved) {
+  const el = document.getElementById(approvalId);
+  if (el) {
+    el.innerHTML = '<span class="approval-text">' + (approved ? 'Plan approved' : 'Plan rejected') + '</span>';
+  }
+  if (window._pendingApproval) window._pendingApproval(approved);
+}
+
+function cancelPipeline() {
+  if (activePipeline) {
+    activePipeline.cancelled = true;
+    activePipeline.steps.forEach(s => {
+      if (!s.status || s.status === 'wait' || s.status === 'running') {
+        if (s.status !== 'running') s.status = 'cancelled';
+      }
+    });
+  }
+}
+
+async function retryStep(stepNum) {
+  if (!activePipeline) return;
+  const step = activePipeline.steps.find(s => s.step === stepNum);
+  if (!step) return;
+
+  step.status = 'wait';
+  step.result = null;
+  delete step._parallel;
+  activePipeline.cancelled = false;
+
+  // Re-render
+  const pipelineEl = document.getElementById(activePipeline.id);
+  if (!pipelineEl) return;
+
+  // Execute just this step
+  const contextParts = [];
+  for (const dep of (step.depends_on || [])) {
+    if (activePipeline.results[dep]) contextParts.push('[Step ' + dep + ' result]: ' + activePipeline.results[dep].slice(0, 1000));
+  }
+  let fullTask = step.subtask;
+  if (contextParts.length) fullTask = 'Previous results:\n' + contextParts.join('\n') + '\n\nYour task: ' + step.subtask;
+
+  step.status = 'running';
+  const agentEntity = { type: 'agent', id: step.agent_id };
+  writeToEntityChat(agentEntity, activeProject, '[Retry] ' + step.subtask, 'user', 'from Orchestrator');
+
+  const renderRetry = () => {
+    const pl = activePipeline;
+    const isDone = pl.steps.every(s => s.status === 'completed' || s.status === 'error' || s.status === 'timeout' || s.status === 'cancelled');
+    const isRunning = pl.steps.some(s => s.status === 'running');
+    let titleRight = isRunning ? '<button class="pipeline-btn stop" onclick="cancelPipeline()">Stop</button>' : '';
+    let html = '<div class="pipeline-title"><span>Pipeline: ' + pl.steps.length + ' step(s)</span>' + titleRight + '</div>';
+    for (const s of pl.steps) {
+      const st = s.status || 'wait';
+      const numCls = st === 'completed' ? 'done' : (st === 'error' || st === 'timeout' || st === 'cancelled') ? 'fail' : st === 'running' ? '' : 'wait';
+      const agentName = s.agent_id.includes('/') ? s.agent_id.split('/').pop() : s.agent_id;
+      html += '<div class="pipeline-step">';
+      html += '<div class="step-num ' + numCls + '">' + s.step + '</div>';
+      html += '<div class="step-body">';
+      html += '<div class="step-agent">' + escapeHtml(agentName) + ' <span style="font-weight:400;color:var(--text2)">(' + st + ')</span></div>';
+      html += '<div class="step-task">' + escapeHtml(s.subtask) + '</div>';
+      if (s.result) html += '<div class="step-result">' + escapeHtml(s.result) + '</div>';
+      if ((st === 'error' || st === 'timeout') && isDone && !isRunning) {
+        html += '<div class="step-actions"><button class="pipeline-btn retry" onclick="retryStep(' + s.step + ')">Retry</button></div>';
+      }
+      html += '</div></div>';
+    }
+    pipelineEl.innerHTML = html;
+  };
+
+  renderRetry();
+
+  const submitData = await api('/agents/submit', {
+    method: 'POST',
+    body: JSON.stringify({ agent_id: step.agent_id, agent_config: { task: fullTask, project_id: activeProject, project_path: activePipeline.path } })
+  });
+  if (!submitData || submitData.status !== 'success') {
+    step.status = 'error'; step.result = 'Submit failed';
+    writeToEntityChat(agentEntity, activeProject, 'Submit failed', 'system', 'Orchestrator');
+    renderRetry(); return;
+  }
+  const execId = submitData.execution_id;
+  for (let i = 0; i < 120; i++) {
+    if (activePipeline.cancelled) { step.status = 'cancelled'; step.result = 'Cancelled'; renderRetry(); return; }
+    await new Promise(r => setTimeout(r, 3000));
+    const statusData = await api('/agents/' + execId + '/status');
+    if (statusData && statusData.status === 'completed') {
+      const res = statusData.result;
+      step.result = typeof res === 'object' ? (res.result || JSON.stringify(res)) : String(res);
+      step.status = 'completed'; activePipeline.results[step.step] = step.result;
+      const agentName = step.agent_id.includes('/') ? step.agent_id.split('/').pop() : step.agent_id;
+      writeToEntityChat(agentEntity, activeProject, step.result, 'agent', agentName);
+      renderRetry();
+      addMessage('Retry step ' + stepNum + ': completed', 'agent', 'Orchestrator');
+      return;
+    } else if (statusData && statusData.status === 'error') {
+      step.status = 'error'; step.result = 'Agent error';
+      writeToEntityChat(agentEntity, activeProject, 'Agent error', 'system', 'Orchestrator');
+      renderRetry(); return;
+    }
+    renderRetry();
+  }
+  step.status = 'timeout'; step.result = 'Timed out';
+  writeToEntityChat(agentEntity, activeProject, 'Timed out', 'system', 'Orchestrator');
+  renderRetry();
+}
+
+// --- Utilities ---
+
+function extractImages(text) {
+  const images = [];
+  const urlRe = /(https?:\/\/[^\s"']+\.(?:png|jpg|jpeg|gif|webp|svg|bmp)(?:\?[^\s"']*)?)/gi;
+  let m;
+  while ((m = urlRe.exec(text)) !== null) images.push({ src: m[1], raw: m[1] });
+  const b64Re = /(data:image\/[a-z+]+;base64,[A-Za-z0-9+/=]+)/g;
+  while ((m = b64Re.exec(text)) !== null) images.push({ src: m[1], raw: m[1] });
+  return images;
+}
+
+function openImage(src) {
+  const overlay = document.createElement('div');
+  overlay.className = 'img-overlay';
+  overlay.onclick = () => overlay.remove();
+  overlay.innerHTML = '<img src="' + src + '"><button class="img-dl" style="opacity:1;position:absolute;bottom:24px;right:24px;padding:8px 16px;font-size:16px" onclick="event.stopPropagation();downloadImage(\'' + src.replace(/'/g, "\\'") + '\')">&#11015; Download</button>';
+  document.body.appendChild(overlay);
+}
+
+function downloadImage(src) {
+  const a = document.createElement('a');
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  a.download = 'aios-image-' + ts + '.png';
+  if (src.startsWith('data:')) { a.href = src; }
+  else {
+    fetch(src).then(r => r.blob()).then(b => { a.href = URL.createObjectURL(b); a.click(); URL.revokeObjectURL(a.href); }).catch(() => { a.href = src; a.click(); });
+    return;
+  }
+  a.click();
+}
+
+function extractResponse(obj) {
+  if (typeof obj === 'string') return obj;
+  if (!obj || typeof obj !== 'object') return String(obj);
+  if (Array.isArray(obj)) {
+    const imgs = obj.filter(i => i.url || i.b64_json);
+    if (imgs.length > 0) return imgs.map(i => i.url || ('data:image/png;base64,' + i.b64_json)).join('\n');
+    return obj.map(extractResponse).join('\n');
+  }
+  if (obj.data && Array.isArray(obj.data)) return extractResponse(obj.data);
+  if (obj.image_url) return obj.image_url;
+  if (obj.url && /\.(png|jpg|jpeg|gif|webp|svg|bmp)/i.test(obj.url)) return obj.url;
+  if (obj.b64_json) return 'data:image/png;base64,' + obj.b64_json;
+  if (obj.response_message) return obj.response_message;
+  if (obj.result && typeof obj.result === 'string') return obj.result;
+  if (obj.result && typeof obj.result === 'object') return extractResponse(obj.result);
+  if (obj.content) return typeof obj.content === 'string' ? obj.content : extractResponse(obj.content);
+  if (obj.response) return typeof obj.response === 'string' ? obj.response : extractResponse(obj.response);
+  if (obj.message) return obj.message;
+  if (obj.text) return obj.text;
+  return JSON.stringify(obj, null, 2);
+}
+
+function escapeHtml(t) {
+  const d = document.createElement('div');
+  d.textContent = t;
+  return d.innerHTML;
+}
+
+// --- Status & Processes ---
+
+async function loadStatus() {
+  const data = await api('/core/status');
+  const dot = document.getElementById('statusDot');
+  const txt = document.getElementById('statusText');
+  if (!data) { dot.className = 'status-dot err'; txt.textContent = 'Disconnected'; return; }
+  const allActive = Object.values(data).every(v => v === 'active');
+  dot.className = 'status-dot ' + (allActive ? 'ok' : 'err');
+  txt.textContent = allActive ? 'All systems active' : 'Some components inactive';
+  const el = document.getElementById('componentsList');
+  el.innerHTML = Object.entries(data).map(([k, v]) =>
+    '<div class="component"><span class="label">' + k + '</span><span class="val ' + v + '">' + v + '</span></div>'
+  ).join('');
+}
+
+let lastProcesses = [];
+async function loadProcesses() {
+  const data = await api('/agents/ps');
+  const procs = (data && data.processes) ? data.processes : [];
+  lastProcesses = procs;
+  const el = document.getElementById('processSummary');
+  if (procs.length === 0) {
+    el.innerHTML = '<span style="color:var(--text2)">No processes</span>';
+    return;
+  }
+  const running = procs.filter(p => p.status === 'running').length;
+  const completed = procs.filter(p => p.status === 'completed').length;
+  const errors = procs.filter(p => p.status === 'error' || p.status === 'timeout').length;
+  let parts = ['<span class="count">' + procs.length + ' total</span>'];
+  if (running) parts.push('<span class="running">' + running + ' running</span>');
+  if (completed) parts.push('<span class="completed">' + completed + ' done</span>');
+  if (errors) parts.push('<span class="errors">' + errors + ' failed</span>');
+  el.innerHTML = '<div>' + parts.join(' &middot; ') + '</div>'
+    + '<button class="btn secondary" style="font-size:11px;padding:3px 10px" onclick="openProcessesModal()">View All</button>';
+  if (document.getElementById('processesModal').classList.contains('hidden')) return;
+  renderProcessesModal();
+}
+
+function openProcessesModal() {
+  document.getElementById('processesModal').classList.remove('hidden');
+  renderProcessesModal();
+}
+function closeProcessesModal() {
+  document.getElementById('processesModal').classList.add('hidden');
+}
+function renderProcessesModal() {
+  const el = document.getElementById('processesModalBody');
+  if (lastProcesses.length === 0) {
+    el.innerHTML = '<span style="font-size:13px;color:var(--text2)">No processes</span>';
+    return;
+  }
+  el.innerHTML = lastProcesses.map(p =>
+    '<div class="process-card">'
+    + '<span class="pid">#' + p.execution_id + '</span> ' + p.agent_id
+    + '<div class="task">' + (p.task || '') + '</div>'
+    + '<span class="pstatus ' + p.status + '">' + p.status + '</span>'
+    + '</div>'
+  ).join('');
+}
+
+function toggleCollapsible(id) {
+  const body = document.getElementById(id + 'Body');
+  const arrow = document.getElementById(id + 'Arrow');
+  body.classList.toggle('collapsed');
+  arrow.classList.toggle('open');
+}
+
+async function restartKernel() {
+  const btn = document.getElementById('restartBtn');
+  btn.disabled = true; btn.textContent = 'Restarting...';
+  addMessage('Restarting kernel...', 'system');
+  const data = await api('/core/refresh', { method: 'POST' });
+  if (data && data.status === 'success') addMessage('Kernel restarted', 'system');
+  else addMessage('Restart failed: ' + (data?.detail || 'unknown error'), 'system');
+  btn.disabled = false; btn.textContent = 'Restart Kernel';
+  await refreshAll();
+}
+
+async function refreshAll() {
+  await Promise.all([loadStatus(), loadModels(), loadProcesses()]);
+  renderAgents();
+  renderOrchestrator();
+}
+
+function toggleTheme() {
+  const html = document.documentElement;
+  const current = html.getAttribute('data-theme') || 'dark';
+  const next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  document.getElementById('themeBtn').innerHTML = next === 'dark' ? '&#9790;' : '&#9728;';
+  saveSettings();
+}
+
+async function loadMemories() {
+  const el = document.getElementById('memoryList');
+  try {
+    const url = `/memory/list?user_id=${encodeURIComponent(activeProject)}`;
+    const data = await api(url);
+    const mems = data.memories || [];
+    if (!mems.length) { el.innerHTML = '<span style="font-size:13px;color:var(--text2)">No memories yet</span>'; return; }
+    el.innerHTML = mems.map(m => {
+      const ts = m.timestamp ? m.timestamp.replace(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/, '$1-$2-$3 $4:$5') : '';
+      const owner = m.metadata?.owner_agent || '';
+      const tags = (m.tags || []).map(t => `<span>${t}</span>`).join('');
+      const cat = m.category && m.category !== 'Uncategorized' ? m.category : '';
+      const meta = [owner, cat, ts].filter(Boolean).join(' · ');
+      return `<div class="mem-item"><div class="mem-meta">${meta}</div><div class="mem-content">${m.content||''}</div>${tags?'<div class="mem-tags">'+tags+'</div>':''}</div>`;
+    }).join('');
+  } catch(e) { el.innerHTML = '<span style="font-size:13px;color:var(--text2)">Memory unavailable</span>'; }
+}
+
+// --- Settings Modal ---
+
+const SETTINGS_STORAGE_KEY = 'aios_settings';
+const DEFAULT_ORCHESTRATOR_PROMPT = `You are the AIOS Task Planner. You break down a user's high-level task into concrete subtasks and assign each to the best available agent.
+
+Available agents:
+{agents_block}
+
+Rules:
+- Output ONLY valid JSON, no markdown, no explanation.
+- Each step has: "step" (number), "agent_id", "subtask" (clear instruction), "depends_on" (list of step numbers whose results this step needs, or []).
+- Assign agents based on their capabilities. Match the subtask type to agent strengths.
+- Use the minimum number of steps needed. Don't over-split.
+- Steps with empty depends_on can run in parallel.
+- If the task is simple and fits one agent, return a single step.
+
+Output format:
+{"steps": [{"step": 1, "agent_id": "aios_local/xxx_agent", "subtask": "...", "depends_on": []}]}`;
+
+let aiosSettings = {
+  systemName: 'AIOS Web UI',
+  userName: 'Nikita',
+  orchestrator: {
+    model: '',
+    provider: '',
+    systemPrompt: DEFAULT_ORCHESTRATOR_PROMPT,
+    requireApproval: true,
+  }
+};
+
+function loadAiosSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (raw) {
+      const saved = JSON.parse(raw);
+      aiosSettings = { ...aiosSettings, ...saved };
+      aiosSettings.orchestrator = { ...aiosSettings.orchestrator, ...(saved.orchestrator || {}) };
+    }
+  } catch(e) {}
+  applySystemName();
+}
+
+function saveAiosSettings() {
+  try { localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(aiosSettings)); } catch(e) {}
+}
+
+function applySystemName() {
+  const el = document.getElementById('systemTitle');
+  const name = aiosSettings.systemName || 'AIOS Web UI';
+  const parts = name.split(' ');
+  el.innerHTML = '<span>' + escapeHtml(parts[0]) + '</span> ' + escapeHtml(parts.slice(1).join(' '));
+  document.title = name;
+}
+
+function openSettings() {
+  document.getElementById('settingsModal').classList.remove('hidden');
+  switchSettingsTab('general');
+}
+
+function closeSettings() {
+  document.getElementById('settingsModal').classList.add('hidden');
+}
+
+let currentSettingsTab = 'general';
+
+function switchSettingsTab(tab) {
+  collectSettingsFromForm();
+  currentSettingsTab = tab;
+  document.getElementById('navGeneral').classList.toggle('active', tab === 'general');
+  document.getElementById('navOrchestrator').classList.toggle('active', tab === 'orchestrator');
+  const body = document.getElementById('settingsBody');
+
+  if (tab === 'general') {
+    body.innerHTML = '<h2>General</h2>'
+      + '<label>System Name</label>'
+      + '<input type="text" id="setSystemName" value="' + escapeHtml(aiosSettings.systemName) + '">'
+      + '<label>Your Name</label>'
+      + '<input type="text" id="setUserName" value="' + escapeHtml(aiosSettings.userName || '') + '">';
+  } else if (tab === 'orchestrator') {
+    const modelOptions = availableModels.map(m => {
+      const val = m.name + '||' + m.backend;
+      const sel = (aiosSettings.orchestrator.model === m.name && aiosSettings.orchestrator.provider === m.backend) ? ' selected' : '';
+      return '<option value="' + escapeHtml(val) + '"' + sel + '>' + escapeHtml(m.name) + ' (' + m.backend + ')</option>';
+    }).join('');
+
+    body.innerHTML = '<h2>Orchestrator</h2>'
+      + '<div class="settings-section">'
+      + '<div class="settings-section-title">Planning Model</div>'
+      + '<label>Model &amp; Provider for plan generation</label>'
+      + '<select id="setOrcModel">'
+      + '<option value="">Default (current selected LLM)</option>'
+      + modelOptions
+      + '</select>'
+      + '</div>'
+      + '<div class="settings-section">'
+      + '<div class="settings-section-title">System Prompt</div>'
+      + '<label>System prompt for the planner (use {agents_block} to insert available agents list)</label>'
+      + '<textarea id="setOrcPrompt" style="min-height:200px">' + escapeHtml(aiosSettings.orchestrator.systemPrompt || '') + '</textarea>'
+      + '</div>'
+      + '<div class="settings-section">'
+      + '<div class="settings-section-title">Behavior</div>'
+      + '<div class="toggle-row">'
+      + '<div><div class="toggle-label">Require plan approval</div>'
+      + '<div class="toggle-desc">Show plan and wait for your approval before executing</div></div>'
+      + '<label class="toggle-switch"><input type="checkbox" id="setOrcApproval"'
+      + (aiosSettings.orchestrator.requireApproval ? ' checked' : '')
+      + '><span class="slider"></span></label>'
+      + '</div>'
+      + '</div>';
+  }
+}
+
+function collectSettingsFromForm() {
+  const nameEl = document.getElementById('setSystemName');
+  if (nameEl) aiosSettings.systemName = nameEl.value;
+  const userNameEl = document.getElementById('setUserName');
+  if (userNameEl) aiosSettings.userName = userNameEl.value;
+
+  const modelEl = document.getElementById('setOrcModel');
+  if (modelEl) {
+    const val = modelEl.value;
+    if (!val) {
+      aiosSettings.orchestrator.model = '';
+      aiosSettings.orchestrator.provider = '';
+    } else {
+      const [model, provider] = val.split('||');
+      aiosSettings.orchestrator.model = model;
+      aiosSettings.orchestrator.provider = provider;
+    }
+  }
+
+  const promptEl = document.getElementById('setOrcPrompt');
+  if (promptEl) aiosSettings.orchestrator.systemPrompt = promptEl.value;
+
+  const approvalEl = document.getElementById('setOrcApproval');
+  if (approvalEl) aiosSettings.orchestrator.requireApproval = approvalEl.checked;
+}
+
+function saveAndCloseSettings() {
+  collectSettingsFromForm();
+  saveAiosSettings();
+  applySystemName();
+  closeSettings();
+}
+
+
+
+// Init
+loadAiosSettings();
+loadChatHistories();
+loadSettings();
+refreshAll();
+setInterval(loadStatus, 10000);
+setInterval(loadProcesses, 5000);
+setInterval(loadMemories, 15000);
+loadMemories();
+</script>
+</body>
+</html>

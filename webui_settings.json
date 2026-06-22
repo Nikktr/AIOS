@@ -1,0 +1,22 @@
+{
+  "agents": [
+    "aios_local/hermes_agent",
+    "aios_local/claude_code_agent",
+    "aios_local/codex_agent"
+  ],
+  "theme": "light",
+  "projects": [
+    "global",
+    "test_site",
+    "test_2"
+  ],
+  "projectPaths": {
+    "test_site": "C:\\Projects\\test_site",
+    "test_2": "C:\\Projects\\test2"
+  },
+  "activeProject": "test_2",
+  "activeEntity": {
+    "type": "agent",
+    "id": "aios_local/codex_agent"
+  }
+}

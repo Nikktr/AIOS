@@ -32,31 +32,24 @@ def useFactory(
             int: A unique process ID for the submitted agent.
         """
         def run_agent(agent_name: str, task):
-            # is_local = False
+            parts = agent_name.split('/')
+            name = parts[1] if len(parts) > 1 else parts[0]
 
-            # if agent_name.count('/') >= 3:
-            #     is_local = True
-            
+            if manager.is_builtin_agent(name):
+                agent_class, config = manager.load_agent(name=name)
+                agent = agent_class(agent_name)
+                return agent.run(task)
+
             try:
                 author, name, version = manager.download_agent(
-                    author=agent_name.split('/')[0],
-                    name=agent_name.split('/')[1]
+                    author=parts[0],
+                    name=name
                 )
                 agent_class, config = manager.load_agent(author, name, version)
-                
-
             except:
                 raise Exception("Agent not found")
-            #     is_local = True
-                
-            # if is_local:
-            # else:
-            #     agent_class, config = manager.load_agent(author, name, version)
 
             agent = agent_class(agent_name)
-
-            # agent.send_request = send_request
-
             return agent.run(task)
         
         # print(declaration_params.agent_name, declaration_params.task_input)

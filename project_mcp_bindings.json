@@ -1,0 +1,9 @@
+{
+  "global": [
+    "linear"
+  ],
+  "test_mcp_project": [
+    "linear"
+  ],
+  "isolated_project": []
+}

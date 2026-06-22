@@ -220,3 +220,8 @@ Cerebrum/*
 
 # mem0
 /.mem0
+# Local claude settings
+.claude/
+
+# Runtime data
+data/

@@ -21,6 +21,8 @@ from aios.hooks.modules.scheduler import rr_scheduler_nonblock as rr_scheduler
 
 from aios.syscall.syscall import useSysCall
 from aios.config.config_manager import config
+from aios.tool.mcp_client import MCPManager
+from aios.orchestrator import create_plan, execute_plan
 from aios.memory.context_injector import ContextInjector
 from aios.memory.conversation_extractor import ConversationExtractor
 
@@ -119,6 +121,7 @@ class QueryRequest(BaseModel):
     agent_name: str
     query_type: Literal["llm", "tool", "storage", "memory"]
     query_data: LLMQuery | ToolQuery | StorageQuery | MemoryQuery
+    project_id: Optional[str] = "global"
 
     @model_validator(mode='before')
     def convert_query_data(cls, data: Any) -> Any:
@@ -569,6 +572,37 @@ async def list_agent_processes():
             detail=f"Failed to list processes: {str(e)}"
         )
 
+BRIDGE_AGENTS_DIR = Path(os.path.join(os.path.dirname(__file__), "..", "..", "Cerebrum", "cerebrum", "example", "agents"))
+
+
+@app.get("/agents/roles")
+async def get_agent_roles():
+    """List all bridge agents with their capabilities and roles."""
+    agents = []
+    bridge_names = ["hermes_agent", "claude_code_agent", "codex_agent"]
+    for name in bridge_names:
+        config_path = BRIDGE_AGENTS_DIR / name / "config.json"
+        if not config_path.exists():
+            continue
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            role = cfg.get("role", {})
+            agents.append({
+                "agent_id": f"aios_local/{name}",
+                "name": name,
+                "description": " ".join(cfg.get("description", [])).strip(),
+                "capabilities": role.get("capabilities", []),
+                "strengths": role.get("strengths", ""),
+                "priority": role.get("priority", 99),
+                "timeout": role.get("timeout", 300),
+            })
+        except Exception:
+            continue
+    agents.sort(key=lambda a: a["priority"])
+    return {"status": "success", "agents": agents}
+
+
 @app.post("/agents/submit")
 async def submit_agent(config: AgentSubmit):
     """Submit an agent for execution using the agent factory."""
@@ -582,8 +616,11 @@ async def submit_agent(config: AgentSubmit):
         print(f"[DEBUG] Task: {config.agent_config.get('task', 'No task specified')}")
         
         _submit_agent = active_components["factory"]["submit"]
+        task_input = config.agent_config
+        if "project_id" not in task_input:
+            task_input["project_id"] = "global"
         execution_id = _submit_agent(
-            agent_name=config.agent_id, task_input=config.agent_config["task"]
+            agent_name=config.agent_id, task_input=task_input
         )
         
         save_agent_process_info(
@@ -725,7 +762,49 @@ async def handle_query(request: QueryRequest):
                 request.agent_name,               # First arg to execute_request
                 query                # Second arg to execute_request
             )
-            
+
+            # Save LLM chat to shared memory
+            try:
+                mm = active_components.get("memory")
+                if mm and hasattr(mm, "provider"):
+                    user_msg = ""
+                    assistant_msg = ""
+                    if request.query_data.messages:
+                        for m in request.query_data.messages:
+                            if m.get("role") == "user":
+                                user_msg = m.get("content", "")
+                            elif m.get("role") == "assistant":
+                                assistant_msg = m.get("content", "")
+                        if not user_msg and request.query_data.messages:
+                            last = request.query_data.messages[-1]
+                            user_msg = last.get("content", "")
+                    resp_text = ""
+                    if isinstance(result_dict, dict):
+                        rd = result_dict.get("response", result_dict)
+                        if isinstance(rd, dict):
+                            resp_text = rd.get("response_message", rd.get("content", rd.get("message", str(rd))))
+                        else:
+                            resp_text = str(rd)
+                    else:
+                        resp_text = str(result_dict)
+                    if user_msg and resp_text:
+                        from aios.memory.note import MemoryNote
+                        llm_name = query_required_llms[0]["name"] if query_required_llms else "llm"
+                        note = MemoryNote(
+                            content=f"Task: {user_msg[:200]}\nResult: {resp_text[:1000]}",
+                            keywords=[],
+                            category="llm_chat",
+                            metadata={
+                                "owner_agent": f"llm/{llm_name}",
+                                "user_id": request.project_id or "global",
+                                "sharing_policy": "shared",
+                                "memory_type": "task_context",
+                            }
+                        )
+                        mm.provider.add(note)
+            except Exception as mem_err:
+                logger.warning(f"Failed to save LLM chat to memory: {mem_err}")
+
             return result_dict
         
         elif request.query_type == "storage":
@@ -794,6 +873,268 @@ async def update_config(request: Request):
             status_code=500,
             detail=f"Failed to update configuration: {str(e)}"
         )
+
+# ===== Orchestrator =====
+
+class OrchestratorRequest(BaseModel):
+    task: str
+    project_id: str = "global"
+    project_path: str = ""
+    context: str = ""
+    model: Optional[str] = None
+    provider: Optional[str] = None
+    system_prompt: Optional[str] = None
+
+
+@app.get("/memory/list")
+async def memory_list(user_id: str = None):
+    """List all memories, optionally filtered by user_id (project)."""
+    try:
+        mm = active_components.get("memory")
+        if not mm or not hasattr(mm, "provider"):
+            return {"memories": [], "count": 0}
+        provider = mm.provider
+        memories_dict = getattr(provider, "memories", {})
+        result = []
+        for mid, note in memories_dict.items():
+            params = note.return_params()
+            note_user = params.get("metadata", {}).get("user_id", "")
+            if user_id and note_user != user_id:
+                continue
+            result.append(params)
+        result.sort(key=lambda m: m.get("timestamp", ""), reverse=True)
+        return {"memories": result, "count": len(result)}
+    except Exception as e:
+        return {"memories": [], "count": 0, "error": str(e)}
+
+
+@app.post("/orchestrator/plan")
+async def orchestrator_plan(req: OrchestratorRequest):
+    """Create an execution plan for a high-level task."""
+    try:
+        task_with_ctx = req.task
+        if req.context:
+            task_with_ctx = f"Conversation context:\n{req.context}\n\nCurrent task: {req.task}"
+        plan = await asyncio.to_thread(
+            create_plan, task_with_ctx, req.project_id, req.project_path,
+            model=req.model, provider=req.provider, custom_system_prompt=req.system_prompt
+        )
+        if "error" in plan:
+            raise HTTPException(status_code=400, detail=plan)
+        # Save plan to shared memory
+        try:
+            mm = active_components.get("memory")
+            if mm and hasattr(mm, "provider"):
+                from aios.memory.note import MemoryNote
+                steps_summary = "; ".join(
+                    f"Step {s.get('step')}: {s.get('agent_id','?')} -> {s.get('subtask','')[:80]}"
+                    for s in (plan.get("steps") or [])
+                )
+                note = MemoryNote(
+                    content=f"Task: {req.task[:200]}\nPlan: {steps_summary[:800]}",
+                    keywords=[],
+                    category="orchestrator_plan",
+                    metadata={
+                        "owner_agent": "orchestrator",
+                        "user_id": req.project_id,
+                        "sharing_policy": "shared",
+                        "memory_type": "task_context",
+                    }
+                )
+                mm.provider.add(note)
+        except Exception:
+            pass
+        return {"status": "success", "plan": plan}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/orchestrator/execute")
+async def orchestrator_execute(req: OrchestratorRequest):
+    """Plan and execute a high-level task end-to-end."""
+    try:
+        task_with_ctx = req.task
+        if req.context:
+            task_with_ctx = f"Conversation context:\n{req.context}\n\nCurrent task: {req.task}"
+        plan = await asyncio.to_thread(
+            create_plan, task_with_ctx, req.project_id, req.project_path,
+            model=req.model, provider=req.provider, custom_system_prompt=req.system_prompt
+        )
+        if "error" in plan:
+            raise HTTPException(status_code=400, detail=plan)
+        result = await asyncio.to_thread(execute_plan, plan)
+        # Save execution result to shared memory
+        try:
+            mm = active_components.get("memory")
+            if mm and hasattr(mm, "provider"):
+                from aios.memory.note import MemoryNote
+                steps_results = "; ".join(
+                    f"Step {s.get('step')}: {s.get('agent_id','?')} [{s.get('status','?')}] -> {str(s.get('result',''))[:100]}"
+                    for s in (result.get("steps") or [])
+                )
+                note = MemoryNote(
+                    content=f"Task: {req.task[:200]}\nExecution: {steps_results[:800]}",
+                    keywords=[],
+                    category="orchestrator_execution",
+                    metadata={
+                        "owner_agent": "orchestrator",
+                        "user_id": req.project_id,
+                        "sharing_policy": "shared",
+                        "memory_type": "task_context",
+                    }
+                )
+                mm.provider.add(note)
+        except Exception:
+            pass
+        return {"status": "success", "plan": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===== MCP Proxy =====
+mcp_manager = MCPManager()
+
+try:
+    _mcp_cfg = config.config.get("mcp_servers", {})
+    if _mcp_cfg:
+        mcp_manager.load_from_config(_mcp_cfg)
+        mcp_manager.start_all()
+        print(f"✅ MCP manager: {len(mcp_manager.server_names)} server(s) loaded")
+    else:
+        print("ℹ️ No MCP servers configured")
+except Exception as e:
+    print(f"⚠️ MCP manager init error (non-fatal): {e}")
+
+
+class MCPCallRequest(BaseModel):
+    server: str
+    tool: str
+    arguments: Dict[str, Any] | None = None
+
+
+@app.get("/mcp/list")
+async def mcp_list_tools():
+    """List all tools from all configured MCP servers."""
+    try:
+        tools = mcp_manager.list_all_tools()
+        return {"status": "success", "servers": tools}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/mcp/call")
+async def mcp_call_tool(req: MCPCallRequest):
+    """Call a tool on a specific MCP server."""
+    try:
+        result = await asyncio.to_thread(
+            mcp_manager.call_tool, req.server, req.tool, req.arguments
+        )
+        return {"status": "success", "result": result}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===== Project-scoped MCP bindings =====
+PROJECT_MCP_FILE = Path("project_mcp_bindings.json")
+
+
+def _load_project_mcp() -> dict:
+    if PROJECT_MCP_FILE.exists():
+        with open(PROJECT_MCP_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _save_project_mcp(data: dict):
+    with open(PROJECT_MCP_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+class MCPBindRequest(BaseModel):
+    servers: list[str]
+
+
+@app.get("/mcp/project/{project_id}/tools")
+async def mcp_project_tools(project_id: str):
+    """List MCP tools available for a specific project."""
+    bindings = _load_project_mcp()
+    if project_id in bindings:
+        bound_servers = bindings[project_id]
+    elif project_id != "global":
+        bound_servers = bindings.get("global", [])
+    else:
+        bound_servers = []
+    if not bound_servers:
+        return {"status": "success", "project": project_id, "servers": {}, "message": "No MCP servers bound to this project"}
+
+    result = {}
+    for srv_name in bound_servers:
+        if srv_name not in mcp_manager.server_names:
+            result[srv_name] = [{"error": f"Server '{srv_name}' not configured"}]
+            continue
+        try:
+            srv = mcp_manager._servers[srv_name]
+            if not srv.is_running():
+                srv.start()
+            result[srv_name] = srv.list_tools()
+        except Exception as e:
+            result[srv_name] = [{"error": str(e)}]
+
+    return {"status": "success", "project": project_id, "servers": result}
+
+
+@app.post("/mcp/project/{project_id}/bind")
+async def mcp_bind_project(project_id: str, req: MCPBindRequest):
+    """Bind MCP servers to a project."""
+    bindings = _load_project_mcp()
+    bindings[project_id] = req.servers
+    _save_project_mcp(bindings)
+    return {"status": "success", "project": project_id, "servers": req.servers}
+
+
+@app.get("/mcp/project/{project_id}/bindings")
+async def mcp_get_bindings(project_id: str):
+    """Get MCP server bindings for a project."""
+    bindings = _load_project_mcp()
+    return {"status": "success", "project": project_id, "servers": bindings.get(project_id, [])}
+
+
+class ProjectInitRequest(BaseModel):
+    path: str
+
+
+@app.post("/project/init")
+async def init_project(req: ProjectInitRequest):
+    """Validate and create project directory if needed."""
+    p = Path(req.path)
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+        return {"status": "success", "path": str(p.resolve()), "created": not p.exists() or True}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot create directory: {e}")
+
+
+WEBUI_SETTINGS_FILE = Path("webui_settings.json")
+
+@app.get("/webui/settings")
+async def get_webui_settings():
+    if WEBUI_SETTINGS_FILE.exists():
+        with open(WEBUI_SETTINGS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    return {"agents": ["aios_local/hermes_agent", "aios_local/claude_code_agent", "aios_local/codex_agent"], "selectedModels": [], "theme": "dark"}
+
+@app.post("/webui/settings")
+async def save_webui_settings(request: Request):
+    data = await request.json()
+    with open(WEBUI_SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return {"status": "success"}
 
 # Add a main function to run the app directly
 if __name__ == "__main__":

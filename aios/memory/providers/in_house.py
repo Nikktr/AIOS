@@ -7,6 +7,8 @@ It supports both ChromaDB and Qdrant vector backends.
 """
 from typing import Dict, Any, List, TYPE_CHECKING
 import os
+import json
+import threading
 
 from cerebrum.memory.apis import MemoryQuery, MemoryResponse
 
@@ -31,33 +33,130 @@ class InHouseProvider(MemoryProvider):
     
     def __init__(self):
         """Initialize the InHouseProvider with empty state.
-        
+
         The actual retriever is created during initialize() based on config.
         """
         self.retriever = None
         self.memories: Dict[str, 'MemoryNote'] = {}
-    
+        self._persist_dir = None
+        self._save_lock = threading.Lock()
+
     def initialize(self, config: Dict[str, Any]) -> None:
         """Initialize the provider with configuration.
-        
+
         Creates the appropriate vector database retriever based on the
-        configured backend (ChromaDB or Qdrant).
-        
+        configured backend (ChromaDB or Qdrant). Loads persisted memories
+        from disk if available.
+
         Args:
             config: Configuration dictionary containing:
                    - vector_db_backend: "chroma" or "qdrant" (default: "chroma")
                    - Additional backend-specific settings
         """
+        self._persist_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
+            "data", "memories"
+        )
+        os.makedirs(self._persist_dir, exist_ok=True)
+
         backend = (
-            config.get("vector_db_backend") 
-            or os.environ.get("VECTOR_DB_BACKEND") 
+            config.get("vector_db_backend")
+            or os.environ.get("VECTOR_DB_BACKEND")
             or "chroma"
         ).lower()
-        
+
         if backend == "qdrant":
             self.retriever = QdrantRetriever()
         else:
             self.retriever = ChromaRetriever()
+
+        self._load_from_disk()
+
+    def _project_file(self, project_id: str) -> str:
+        safe_name = project_id.replace("/", "_").replace("\\", "_").replace(":", "_")
+        return os.path.join(self._persist_dir, f"{safe_name}.json")
+
+    def _save_to_disk(self) -> None:
+        """Persist memories to per-project JSON files."""
+        if not self._persist_dir:
+            return
+        try:
+            by_project: Dict[str, Dict] = {}
+            for mid, note in self.memories.items():
+                project_id = note.metadata.get("user_id", "global")
+                if project_id not in by_project:
+                    by_project[project_id] = {}
+                by_project[project_id][mid] = note.return_params()
+
+            with self._save_lock:
+                existing_files = set()
+                for fname in os.listdir(self._persist_dir):
+                    if fname.endswith(".json"):
+                        existing_files.add(fname)
+
+                written_files = set()
+                for project_id, data in by_project.items():
+                    fpath = self._project_file(project_id)
+                    tmp = fpath + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                    os.replace(tmp, fpath)
+                    written_files.add(os.path.basename(fpath))
+
+                for stale in existing_files - written_files:
+                    os.remove(os.path.join(self._persist_dir, stale))
+        except Exception as e:
+            print(f"[MemoryPersist] Failed to save: {e}")
+
+    def _load_from_disk(self) -> None:
+        """Load memories from per-project JSON files and re-index into ChromaDB."""
+        if not self._persist_dir or not os.path.isdir(self._persist_dir):
+            return
+        try:
+            from aios.memory.note import MemoryNote
+            loaded = 0
+            for fname in os.listdir(self._persist_dir):
+                if not fname.endswith(".json"):
+                    continue
+                fpath = os.path.join(self._persist_dir, fname)
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                for mid, params in data.items():
+                    note = MemoryNote(
+                        content=params.get("content", ""),
+                        id=params.get("id", mid),
+                        keywords=params.get("keywords"),
+                        links=params.get("links"),
+                        retrieval_count=params.get("retrieval_count"),
+                        timestamp=params.get("timestamp"),
+                        last_accessed=params.get("last_accessed"),
+                        context=params.get("context"),
+                        evolution_history=params.get("evolution_history"),
+                        category=params.get("category"),
+                        tags=params.get("tags"),
+                        metadata=params.get("metadata"),
+                    )
+                    self.memories[note.id] = note
+                    metadata = {
+                        "context": note.context,
+                        "keywords": note.keywords,
+                        "tags": note.tags,
+                        "category": note.category,
+                        "timestamp": note.timestamp,
+                    }
+                    for key in ("owner_agent", "user_id", "sharing_policy", "memory_type"):
+                        if key in note.metadata:
+                            metadata[key] = note.metadata[key]
+                    try:
+                        self.retriever.add_document(
+                            document=note.content, metadata=metadata, doc_id=note.id
+                        )
+                    except Exception:
+                        pass
+                    loaded += 1
+            print(f"[MemoryPersist] Loaded {loaded} memories from {self._persist_dir}")
+        except Exception as e:
+            print(f"[MemoryPersist] Failed to load: {e}")
     
     def add_memory(self, memory_note: 'MemoryNote') -> MemoryResponse:
         """Add a memory note to storage.
@@ -104,10 +203,11 @@ class InHouseProvider(MemoryProvider):
                 doc_id=memory_note.id
             )
             self.memories[memory_note.id] = memory_note
+            self._save_to_disk()
             return MemoryResponse(success=True, memory_id=memory_note.id)
         except Exception as e:
             return MemoryResponse(
-                success=False, 
+                success=False,
                 error=f"Failed to add memory: {str(e)}"
             )
     
@@ -128,10 +228,11 @@ class InHouseProvider(MemoryProvider):
             try:
                 self.retriever.delete_document(memory_id)
                 del self.memories[memory_id]
+                self._save_to_disk()
                 return MemoryResponse(success=True, memory_id=memory_id)
             except Exception as e:
                 return MemoryResponse(
-                    success=False, 
+                    success=False,
                     error=f"Failed to remove memory: {str(e)}"
                 )
         return MemoryResponse(success=False, error="Memory not found")
@@ -192,15 +293,16 @@ class InHouseProvider(MemoryProvider):
             }
             self.retriever.delete_document(memory_id)
             self.retriever.add_document(
-                document=existing_memory.content, 
-                metadata=metadata, 
+                document=existing_memory.content,
+                metadata=metadata,
                 doc_id=memory_id
             )
-            
+
+            self._save_to_disk()
             return MemoryResponse(success=True, memory_id=memory_id)
         except Exception as e:
             return MemoryResponse(
-                success=False, 
+                success=False,
                 error=f"Failed to update memory: {str(e)}"
             )
     

@@ -67,13 +67,17 @@ class SimpleEmbeddingRetriever:
 
 class ChromaRetriever:
     """Vector database retrieval using ChromaDB"""
-    def __init__(self, collection_name: str = "memories"):
+    def __init__(self, collection_name: str = "memories", persist_directory: str = None):
         """Initialize ChromaDB retriever.
 
         Args:
             collection_name: Name of the ChromaDB collection
+            persist_directory: Directory for persistent storage. If None, uses default path.
         """
-        self.client = chromadb.Client(Settings(allow_reset=True))
+        if persist_directory is None:
+            persist_directory = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "chroma")
+        os.makedirs(persist_directory, exist_ok=True)
+        self.client = chromadb.PersistentClient(path=persist_directory)
         self.collection = self.client.get_or_create_collection(name=collection_name)
 
     def add_document(self, document: str, metadata: Dict, doc_id: str):
@@ -92,7 +96,7 @@ class ChromaRetriever:
             else:
                 processed_metadata[key] = value
 
-        self.collection.add(
+        self.collection.upsert(
             documents=[document],
             metadatas=[processed_metadata],
             ids=[doc_id]
