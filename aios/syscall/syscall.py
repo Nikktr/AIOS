@@ -66,29 +66,14 @@ class SyscallExecutor:
         elif isinstance(query, ToolQuery):
             return ToolSyscall(agent_name, query)
 
+    SYSCALL_TIMEOUT = 300  # seconds — max time to wait for scheduler to process a syscall
+
     def _execute_syscall(self, agent_name: str, query) -> Dict[str, Any]:
         """
         Execute a system call and collect timing metrics.
-        
-        Args:
-            syscall: The system call object to execute
-            
-        Returns:
-            Dict containing response and timing metrics
-            
-        Example:
-            ```python
-            syscall = StorageSyscall("agent_1", query)
-            result = executor._execute_syscall(syscall)
-            # Returns:
-            {
-                "response": "Operation completed",
-                "start_times": [1234567890.123],
-                "end_times": [1234567890.234],
-                "waiting_times": [0.111],
-                "turnaround_times": [0.222]
-            }
-            ```
+
+        Raises TimeoutError if the scheduler doesn't complete the syscall
+        within SYSCALL_TIMEOUT seconds.
         """
         completed_response = ""
         start_times, end_times = [], []
@@ -97,49 +82,53 @@ class SyscallExecutor:
         with self.id_lock:
             self.id += 1
             syscall_id = self.id
-        
+
         while True:
-            # syscall = copy.deepcopy(syscall)
             syscall = self.create_syscall(agent_name, query)
             syscall.set_status("active")
-            
+
             current_time = time.time()
             syscall.set_created_time(current_time)
             syscall.set_response(None)
 
             if not syscall.get_source():
                 syscall.set_source(syscall.agent_name)
-            
+
             if not syscall.get_pid():
                 syscall.set_pid(syscall_id)
-            
+
             if isinstance(syscall, LLMSyscall):
                 global_llm_req_queue_add_message(syscall)
                 print(f"Syscall {syscall.agent_name} added to LLM queue")
-                
+
             elif isinstance(syscall, StorageSyscall):
                 global_storage_req_queue_add_message(syscall)
             elif isinstance(syscall, ToolSyscall):
                 global_tool_req_queue_add_message(syscall)
             else:
-                # MemorySyscall — imported locally to avoid circular import
                 from aios.syscall.memory import MemorySyscall
                 if isinstance(syscall, MemorySyscall):
                     global_memory_req_queue_add_message(syscall)
-            
+
             syscall.start()
-            syscall.join()
-            
-            # breakpoint()
+            syscall.join(timeout=self.SYSCALL_TIMEOUT)
+
+            if syscall.is_alive():
+                syscall.set_status("done")
+                syscall.event.set()
+                logger.error(
+                    "Syscall timeout (%ss) for agent=%s query_type=%s",
+                    self.SYSCALL_TIMEOUT, agent_name, type(query).__name__,
+                )
+                raise TimeoutError(
+                    f"Syscall for '{agent_name}' timed out after {self.SYSCALL_TIMEOUT}s"
+                )
 
             completed_response = syscall.get_response()
-            
+
             if syscall.get_status() == "done":
                 break
-            
-            # breakpoint()
-            
-            # Calculate timing metrics
+
             start_time = syscall.get_start_time()
             end_time = syscall.get_end_time()
             waiting_time = start_time - syscall.get_created_time()

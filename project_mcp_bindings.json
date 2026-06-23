@@ -5,5 +5,8 @@
   "test_mcp_project": [
     "linear"
   ],
-  "isolated_project": []
+  "isolated_project": [],
+  "test_2": [
+    "linear"
+  ]
 }

@@ -344,10 +344,10 @@ def double_underscore_to_slash(tool_calls):
         ```
     """
     for tool_call in tool_calls:
-        tool_call["name"] = tool_call["name"].replace("__", "/")
+        if not tool_call["name"].startswith("mcp__"):
+            tool_call["name"] = tool_call["name"].replace("__", "/")
         if isinstance(tool_call["parameters"], str):
             tool_call["parameters"] = json.loads(tool_call["parameters"])
-        # tool_call["parameters"] = json.loads(tool_call["parameters"])
     return tool_calls
 
 def pre_process_tools(tools):

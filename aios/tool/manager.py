@@ -1,5 +1,6 @@
 import importlib
 import subprocess
+import json
 import os # Added for path manipulation
 import signal # Added to send signals to subprocess
 
@@ -21,6 +22,7 @@ class ToolManager:
         self.log_mode = log_mode
         self.tool_conflict_map = {}
         self.tool_conflict_map_lock = Lock()
+        self.mcp_manager = None
         self.mcp_server_process = None # To store the mcp_server subprocess
         self._start_mcp_server() # Start mcp_server on initialization
         
@@ -92,22 +94,32 @@ class ToolManager:
                     tool_call["name"],
                     tool_call["parameters"],
                 )
-                # org, tool_name = tool_org_and_name.split("/")
+
+                if tool_org_and_name.startswith("mcp__") and self.mcp_manager is not None:
+                    tool_result = self.mcp_manager.execute_tool_call(
+                        tool_org_and_name, tool_params
+                    )
+                    if not isinstance(tool_result, str):
+                        tool_result = json.dumps(tool_result, ensure_ascii=False)
+                    return ToolResponse(
+                        response_message=tool_result,
+                        finished=True
+                    )
+
                 with self.tool_conflict_map_lock:
                     if tool_org_and_name not in self.tool_conflict_map.keys():
                         self.tool_conflict_map[tool_org_and_name] = 1
                         tool = self.load_tool_instance(tool_org_and_name)
 
-                        # tool = tool_class()
                         tool_result = tool.run(params=tool_params)
 
                         self.tool_conflict_map.pop(tool_org_and_name)
-                        
+
                         return ToolResponse(
                             response_message=tool_result,
                             finished=True
                         )
-                    
+
         except Exception as e:
             return ToolResponse(
                 response_message=f"Tool calling error: {e}",

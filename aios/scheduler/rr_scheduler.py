@@ -162,40 +162,16 @@ class RRScheduler(BaseScheduler):
             traceback.print_exc()
 
     def process_llm_requests(self) -> None:
-        """
-        Process LLM requests with time slicing.
-        
-        Example:
-            ```python
-            scheduler.process_llm_requests()
-            # Processes LLM requests with 50ms time slices:
-            # {
-            #     "messages": [{"role": "user", "content": "Hello"}],
-            #     "temperature": 0.7
-            # }
-            ```
-        """
         while self.active:
             try:
                 llm_syscall = self.get_llm_syscall()
                 self._execute_batch_syscalls(llm_syscall, self.llm.execute_llm_syscalls, "LLM")
             except Empty:
                 pass
+            except Exception:
+                logger.exception("Unexpected error in LLM request loop")
 
     def process_memory_requests(self) -> None:
-        """
-        Process Memory requests with time slicing.
-        
-        Example:
-            ```python
-            scheduler.process_memory_requests()
-            # Processes Memory requests with 50ms time slices:
-            # {
-            #     "operation": "store",
-            #     "data": {"key": "value"}
-            # }
-            ```
-        """
         while self.active:
             try:
                 memory_syscall = self.get_memory_syscall()
@@ -206,22 +182,10 @@ class RRScheduler(BaseScheduler):
                 )
             except Empty:
                 pass
+            except Exception:
+                logger.exception("Unexpected error in memory request loop")
 
     def process_storage_requests(self) -> None:
-        """
-        Process Storage requests with time slicing.
-        
-        Example:
-            ```python
-            scheduler.process_storage_requests()
-            # Processes Storage requests with 50ms time slices:
-            # {
-            #     "operation": "write",
-            #     "path": "/tmp/file.txt",
-            #     "content": "Hello, World!"
-            # }
-            ```
-        """
         while self.active:
             try:
                 storage_syscall = self.get_storage_syscall()
@@ -232,24 +196,10 @@ class RRScheduler(BaseScheduler):
                 )
             except Empty:
                 pass
+            except Exception:
+                logger.exception("Unexpected error in storage request loop")
 
     def process_tool_requests(self) -> None:
-        """
-        Process Tool requests with time slicing.
-        
-        Example:
-            ```python
-            scheduler.process_tool_requests()
-            # Processes Tool requests with 50ms time slices:
-            # {
-            #     "name": "calculator",
-            #     "arguments": {
-            #         "operation": "add",
-            #         "numbers": [1, 2]
-            #     }
-            # }
-            ```
-        """
         while self.active:
             try:
                 tool_syscall = self.get_tool_syscall()
@@ -260,6 +210,8 @@ class RRScheduler(BaseScheduler):
                 )
             except Empty:
                 pass
+            except Exception:
+                logger.exception("Unexpected error in tool request loop")
 
     def start(self) -> None:
         """

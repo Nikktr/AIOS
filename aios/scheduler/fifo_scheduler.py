@@ -203,51 +203,43 @@ class FIFOScheduler(BaseScheduler):
             traceback.print_exc()
 
 
+    BATCH_MIN = 0.05
+    BATCH_MAX = 1.0
+    BATCH_GROW = 1.5
+    BATCH_SHRINK = 0.5
+
     def process_llm_requests(self) -> None:
-        """
-        Process LLM requests from the queue in batches based on batch_interval.
-        
-        Example:
-            ```python
-            # Collects LLM requests for 0.1 seconds (default) then processes them:
-            # Batch = [
-            #   {"messages": [{"role": "user", "content": "Hello"}]},
-            #   {"messages": [{"role": "user", "content": "World"}]}
-            # ]
-            # Calls self.llm.execute_batch_llm_syscall(Batch)
-            ```
-        """
+        interval = self.batch_interval
         while self.active:
-            time.sleep(self.batch_interval)
-
-            batch = []
-            while True:
+            try:
+                # Block on first item to avoid busy-wait
                 try:
-                    llm_syscall = self.get_llm_syscall()
-                    # Add logging here: print(f"Retrieved syscall: {llm_syscall.pid}, Queue size now: {self.llm_queue.qsize()}")
-                    batch.append(llm_syscall)
+                    first = self.get_llm_syscall()
                 except Empty:
-                    # This is the expected way to finish collecting the batch
-                    # print(f"Queue empty, finishing batch collection with {len(batch)} items.")
-                    break
+                    interval = min(interval * self.BATCH_GROW, self.BATCH_MAX)
+                    continue
 
-            if batch:
+                # Short wait to collect more items into batch
+                time.sleep(interval)
+
+                batch = [first]
+                while True:
+                    try:
+                        batch.append(self.get_llm_syscall())
+                    except Empty:
+                        break
+
                 self._execute_batch_syscalls(batch, self.llm.execute_llm_syscalls, "LLM")
 
+                # Adapt: more items → shorter wait next time
+                if len(batch) > 1:
+                    interval = max(interval * self.BATCH_SHRINK, self.BATCH_MIN)
+                else:
+                    interval = min(interval * self.BATCH_GROW, self.BATCH_MAX)
+            except Exception:
+                logger.exception("Unexpected error in LLM request loop")
+
     def process_memory_requests(self) -> None:
-        """
-        Process Memory requests from the queue.
-        
-        Example:
-            ```python
-            scheduler.process_memory_requests()
-            # Processes Memory requests like:
-            # {
-            #     "operation": "store",
-            #     "data": {"key": "value"}
-            # }
-            ```
-        """
         while self.active:
             try:
                 memory_syscall = self.get_memory_syscall()
@@ -258,22 +250,10 @@ class FIFOScheduler(BaseScheduler):
                 )
             except Empty:
                 pass
+            except Exception:
+                logger.exception("Unexpected error in memory request loop")
 
     def process_storage_requests(self) -> None:
-        """
-        Process Storage requests from the queue.
-        
-        Example:
-            ```python
-            scheduler.process_storage_requests()
-            # Processes Storage requests like:
-            # {
-            #     "operation": "write",
-            #     "path": "/tmp/file.txt",
-            #     "content": "Hello, World!"
-            # }
-            ```
-        """
         while self.active:
             try:
                 storage_syscall = self.get_storage_syscall()
@@ -284,24 +264,10 @@ class FIFOScheduler(BaseScheduler):
                 )
             except Empty:
                 pass
+            except Exception:
+                logger.exception("Unexpected error in storage request loop")
 
     def process_tool_requests(self) -> None:
-        """
-        Process Tool requests from the queue.
-        
-        Example:
-            ```python
-            scheduler.process_tool_requests()
-            # Processes Tool requests like:
-            # {
-            #     "name": "calculator",
-            #     "arguments": {
-            #         "operation": "add",
-            #         "numbers": [1, 2]
-            #     }
-            # }
-            ```
-        """
         while self.active:
             try:
                 tool_syscall = self.get_tool_syscall()
@@ -312,6 +278,8 @@ class FIFOScheduler(BaseScheduler):
                 )
             except Empty:
                 pass
+            except Exception:
+                logger.exception("Unexpected error in tool request loop")
 
     def start(self) -> None:
         """

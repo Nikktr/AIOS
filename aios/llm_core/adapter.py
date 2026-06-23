@@ -112,7 +112,8 @@ class LLMAdapter:
         self.context_manager = SimpleContextManager() if use_context_manager else None
         self.llm_configs = llm_configs
         self.llms = []
-        
+        self.mcp_manager = None
+
         self._setup_api_keys()
         self._initialize_llms()
         
@@ -738,6 +739,19 @@ class LLMAdapter:
                         error=f"Tool processing error: {e}", finished=True, status_code=400
                     ))
             
+            # --- MCP Tool Injection ---
+            if self.mcp_manager is not None:
+                try:
+                    mcp_tools = self.mcp_manager.get_tools_as_openai_functions()
+                    if mcp_tools:
+                        mcp_prepared = slash_to_double_underscore(mcp_tools)
+                        if prepared_tools is None:
+                            prepared_tools = mcp_prepared
+                        else:
+                            prepared_tools = prepared_tools + mcp_prepared
+                except Exception as e:
+                    logger.warning(f"Failed to inject MCP tools: {e}")
+
             # --- Model Response Generation ---
             try:
                 completed_response, finished = self._get_model_response(
@@ -1057,6 +1071,17 @@ class LLMAdapter:
                     finished=finished,
                     status_code=200
                 )
+
+            # --- ModelResponse object (litellm) ---
+            if hasattr(completed_response, "choices") and completed_response.choices:
+                msg = completed_response.choices[0].message
+                content = getattr(msg, "content", None)
+                if content:
+                    return LLMResponse(
+                        response_message=content,
+                        finished=True,
+                        status_code=200
+                    )
 
             # --- Fallback for Unexpected Types ---
             logger.warning(f"Unexpected response type received in _process_response: {type(completed_response)}. Content: {str(completed_response)[:200]}...")

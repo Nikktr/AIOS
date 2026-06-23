@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from threading import Thread
 from typing import List, Callable, Dict, Any
 import logging
+import time
 
 from aios.hooks.types.llm import LLMRequestQueueGetMessage
 from aios.hooks.types.memory import MemoryRequestQueueGetMessage
@@ -12,6 +13,8 @@ from aios.memory.manager import MemoryManager
 from aios.storage.storage import StorageManager
 from aios.llm_core.adapter import LLMAdapter
 from aios.tool.manager import ToolManager
+
+logger = logging.getLogger(__name__)
 
 class BaseScheduler(ABC):
     """
@@ -74,51 +77,77 @@ class BaseScheduler(ABC):
         self.active = False
         self.log_mode = log_mode
         self.logger = self._setup_logger()
-        
+
         self.processing_threads: Dict[str, Thread] = {}
+        self._processors: Dict[str, Callable] = {}
+        self._supervisor_thread: Thread | None = None
+        self._restart_counts: Dict[str, int] = {}
+
+    SUPERVISOR_INTERVAL = 5  # seconds between health checks
+    MAX_RESTARTS = 10  # per thread before giving up
 
     def _setup_logger(self) -> SchedulerLogger:
-        """
-        Set up the scheduler's logger.
-        
-        Returns:
-            Configured SchedulerLogger instance
-        """
         return SchedulerLogger(self.__class__.__name__, self.log_mode)
 
+    def _guarded_run(self, name: str, fn: Callable) -> None:
+        try:
+            fn()
+        except Exception:
+            logger.exception("Scheduler thread '%s' crashed", name)
+
+    def _start_worker(self, name: str, fn: Callable) -> None:
+        thread = Thread(
+            target=self._guarded_run, args=(name, fn),
+            name=name, daemon=True,
+        )
+        self.processing_threads[name] = thread
+        thread.start()
+
+    def _supervisor(self) -> None:
+        while self.active:
+            time.sleep(self.SUPERVISOR_INTERVAL)
+            for name, fn in list(self._processors.items()):
+                thread = self.processing_threads.get(name)
+                if thread and thread.is_alive():
+                    continue
+                count = self._restart_counts.get(name, 0)
+                if count >= self.MAX_RESTARTS:
+                    logger.error(
+                        "Scheduler thread '%s' exceeded %d restarts, giving up",
+                        name, self.MAX_RESTARTS,
+                    )
+                    continue
+                self._restart_counts[name] = count + 1
+                logger.warning(
+                    "Scheduler thread '%s' is dead, restarting (%d/%d)",
+                    name, count + 1, self.MAX_RESTARTS,
+                )
+                self._start_worker(name, fn)
+
     def start_processing_threads(self, processors: List[Callable]) -> None:
-        """
-        Start processing threads for different request types.
-        
-        Args:
-            processors: List of processor functions to run in threads
-            
-        Example:
-            ```python
-            scheduler.start_processing_threads([
-                self.process_llm_requests,
-                self.process_memory_requests
-            ])
-            ```
-        """
         for processor in processors:
-            thread_name = processor.__name__
-            thread = Thread(target=processor, name=thread_name)
-            self.processing_threads[thread_name] = thread
-            thread.start()
+            name = processor.__name__
+            self._processors[name] = processor
+            self._restart_counts[name] = 0
+            self._start_worker(name, processor)
+
+        self._supervisor_thread = Thread(
+            target=self._supervisor, name="scheduler_supervisor", daemon=True,
+        )
+        self._supervisor_thread.start()
+        logger.info(
+            "Scheduler supervisor started, watching %d threads",
+            len(self._processors),
+        )
 
     def stop_processing_threads(self) -> None:
-        """
-        Stop all processing threads gracefully.
-        
-        Example:
-            ```python
-            scheduler.stop_processing_threads()
-            ```
-        """
+        self.active = False
+        if self._supervisor_thread:
+            self._supervisor_thread.join(timeout=10)
         for thread in self.processing_threads.values():
-            thread.join()
+            thread.join(timeout=5)
         self.processing_threads.clear()
+        self._processors.clear()
 
     @abstractmethod
     def process_llm_requests(self) -> None:

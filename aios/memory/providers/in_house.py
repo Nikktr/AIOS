@@ -9,6 +9,7 @@ from typing import Dict, Any, List, TYPE_CHECKING
 import os
 import json
 import threading
+from datetime import datetime, timedelta
 
 from cerebrum.memory.apis import MemoryQuery, MemoryResponse
 
@@ -477,9 +478,53 @@ class InHouseProvider(MemoryProvider):
         
         return retrieved_memories[:k]
     
+    def cleanup_expired(self, ttl_hours: int = 72, max_per_project: int = 200) -> int:
+        """Remove memories older than TTL and cap per-project count.
+
+        Args:
+            ttl_hours: Max age in hours. Memories older than this are removed.
+            max_per_project: Keep at most this many memories per project (newest first).
+
+        Returns:
+            Number of memories removed.
+        """
+        cutoff = (datetime.now() - timedelta(hours=ttl_hours)).strftime("%Y%m%d%H%M")
+        to_remove = []
+
+        for mid, note in self.memories.items():
+            ts = note.timestamp or ""
+            if ts and ts < cutoff:
+                to_remove.append(mid)
+
+        by_project: Dict[str, list] = {}
+        for mid, note in self.memories.items():
+            if mid in to_remove:
+                continue
+            pid = note.metadata.get("user_id", "global")
+            by_project.setdefault(pid, []).append((note.timestamp or "", mid))
+
+        for pid, items in by_project.items():
+            if len(items) > max_per_project:
+                items.sort(reverse=True)
+                for _, mid in items[max_per_project:]:
+                    if mid not in to_remove:
+                        to_remove.append(mid)
+
+        for mid in to_remove:
+            try:
+                self.retriever.delete_document(mid)
+            except Exception:
+                pass
+            self.memories.pop(mid, None)
+
+        if to_remove:
+            self._save_to_disk()
+
+        return len(to_remove)
+
     def close(self) -> None:
         """Clean up resources.
-        
+
         For InHouseProvider, this is a no-op for backward compatibility
         as the existing implementation doesn't require explicit cleanup.
         """

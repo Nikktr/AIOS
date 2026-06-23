@@ -369,6 +369,8 @@
     animation: spin 0.8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+  .cursor-blink { animation: blink 0.7s step-end infinite; color: var(--accent); font-weight: bold; }
   .img-wrap {
     position: relative;
     display: inline-block;
@@ -635,10 +637,48 @@
 
 <script>
 const API = 'http://localhost:8000';
+const WS_URL = 'ws://localhost:8000/ws';
 const CHAT_STORAGE_KEY = 'aios_chat_histories';
 const MAX_CONTEXT_MESSAGES = 20;
 
+// --- WebSocket ---
+let _ws = null;
+let _wsReqId = 0;
+const _wsCallbacks = {};
+
+function wsConnect() {
+  if (_ws && _ws.readyState <= 1) return;
+  _ws = new WebSocket(WS_URL);
+  _ws.onopen = () => console.log('[WS] connected');
+  _ws.onclose = () => { console.log('[WS] disconnected'); setTimeout(wsConnect, 3000); };
+  _ws.onerror = (e) => console.warn('[WS] error', e);
+  _ws.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      const cb = _wsCallbacks[msg.id];
+      if (cb) cb(msg);
+    } catch(e) { console.warn('[WS] parse error', e); }
+  };
+}
+
+function wsSend(data, callback) {
+  const id = String(++_wsReqId);
+  data.id = id;
+  if (callback) _wsCallbacks[id] = callback;
+  if (_ws && _ws.readyState === 1) {
+    _ws.send(JSON.stringify(data));
+  } else {
+    wsConnect();
+    const wait = setInterval(() => {
+      if (_ws && _ws.readyState === 1) { clearInterval(wait); _ws.send(JSON.stringify(data)); }
+    }, 200);
+    setTimeout(() => clearInterval(wait), 10000);
+  }
+  return id;
+}
+
 let registeredAgents = [];
+let agentMeta = {};
 let settingsLoaded = false;
 let activeProject = 'global';
 let projects = ['global'];
@@ -809,6 +849,33 @@ function addMessage(text, role = 'system', meta = '', isHtml = false) {
   div.scrollIntoView({ behavior: 'smooth' });
 }
 
+function addStreamingMessage(role, meta) {
+  const div = document.createElement('div');
+  div.className = 'message ' + role;
+  const metaHtml = meta ? '<div class="meta">' + escapeHtml(meta) + '</div>' : '';
+  div.innerHTML = metaHtml + '<span class="stream-text"></span><span class="cursor-blink">|</span>';
+  document.getElementById('messages').appendChild(div);
+  div.scrollIntoView({ behavior: 'smooth' });
+  return { el: div, text: '', role, meta };
+}
+
+function appendStreamChunk(handle, chunk) {
+  handle.text += chunk;
+  const span = handle.el.querySelector('.stream-text');
+  if (span) span.textContent = handle.text;
+  handle.el.scrollIntoView({ behavior: 'smooth' });
+}
+
+function finalizeStreamingMessage(handle) {
+  const cursor = handle.el.querySelector('.cursor-blink');
+  if (cursor) cursor.remove();
+  if (activeEntity) {
+    const history = getCurrentHistory();
+    history.push({ role: handle.role, text: handle.text, meta: handle.meta || '', isHtml: false, timestamp: Date.now() });
+    saveChatHistories();
+  }
+}
+
 function getContextMessages() {
   const history = getCurrentHistory();
   const contextMsgs = [];
@@ -872,12 +939,19 @@ function renderAgents() {
   el.innerHTML = registeredAgents.map(id => {
     const isActive = activeEntity && activeEntity.type === 'agent' && activeEntity.id === id;
     const name = id.includes('/') ? id.split('/').pop() : id;
+    const meta = agentMeta[id];
+    const caps = (meta && meta.capabilities && meta.capabilities.length)
+      ? '<div style="font-size:10px;color:var(--text2);margin-top:3px">' + meta.capabilities.map(c => '<span class="badge" style="font-size:9px;margin-right:3px">' + escapeHtml(c) + '</span>').join('') + '</div>'
+      : '';
+    const str = (meta && meta.strengths) ? '<div style="font-size:10px;color:var(--text2);margin-top:2px;font-style:italic">' + escapeHtml(meta.strengths).slice(0, 80) + '</div>' : '';
     return '<div class="model-card ' + (isActive ? 'selected' : '') + '" onclick="selectEntity({type:\'agent\',id:\'' + escapeHtml(id) + '\'})">'
       + '<div class="name">' + escapeHtml(name) + '</div>'
       + '<div class="backend" style="display:flex;justify-content:space-between;align-items:center">'
       + '<span class="badge agent-badge">' + escapeHtml(id) + '</span>'
       + '<span class="remove-agent" onclick="event.stopPropagation();removeAgent(\'' + escapeHtml(id) + '\')" title="Remove">&times;</span>'
-      + '</div></div>';
+      + '</div>'
+      + caps + str
+      + '</div>';
   }).join('');
 }
 
@@ -1045,8 +1119,11 @@ async function syncAgentsFromKernel() {
     const data = await api('/agents/roles');
     if (data && data.agents) {
       for (const a of data.agents) {
-        if (a.agent_id && !registeredAgents.includes(a.agent_id)) {
-          registeredAgents.push(a.agent_id);
+        if (a.agent_id) {
+          agentMeta[a.agent_id] = a;
+          if (!registeredAgents.includes(a.agent_id)) {
+            registeredAgents.push(a.agent_id);
+          }
         }
       }
       renderAgents();
@@ -1084,6 +1161,33 @@ async function submitAgentTask(agentId, task) {
   }
   const fullTask = contextBlock ? 'Conversation history:\n' + contextBlock + '\n\nCurrent task: ' + task : task;
 
+  if (_ws && _ws.readyState === 1) {
+    wsSend({
+      type: 'agent_submit',
+      agent_id: agentId,
+      agent_config: { task: fullTask, project_id: activeProject, project_path: projectPaths[activeProject] || '' },
+      project_id: activeProject
+    }, (msg) => {
+      if (msg.type === 'agent_submitted') {
+        addMessage('Execution ID: ' + msg.execution_id, 'system');
+      } else if (msg.type === 'agent_completed') {
+        addMessage(extractResponse(msg.result), 'agent', agentName);
+        loadProcesses();
+        delete _wsCallbacks[msg.id];
+      } else if (msg.type === 'agent_error') {
+        addMessage('Error: ' + (msg.detail || 'Agent failed'), 'system');
+        loadProcesses();
+        delete _wsCallbacks[msg.id];
+      } else if (msg.type === 'agent_timeout') {
+        addMessage('Agent timed out', 'system');
+        loadProcesses();
+        delete _wsCallbacks[msg.id];
+      }
+    });
+    loadProcesses();
+    return;
+  }
+
   const data = await api('/agents/submit', {
     method: 'POST',
     body: JSON.stringify({
@@ -1107,12 +1211,39 @@ async function submitLLMChat(text) {
   addMessage(text, 'user', aiosSettings.userName || 'You');
 
   const messages = getContextMessages();
-
   const selModel = { name: activeEntity.id, provider: activeEntity.provider };
-  await api('/user/select/llms', {
-    method: 'POST',
-    body: JSON.stringify([selModel])
-  });
+
+  if (_ws && _ws.readyState === 1) {
+    await api('/user/select/llms', { method: 'POST', body: JSON.stringify([selModel]) });
+    let streamHandle = null;
+    wsSend({
+      type: 'llm_query',
+      agent_name: 'webui_user',
+      project_id: activeProject,
+      messages: messages,
+      action_type: 'chat',
+      llms: [selModel],
+      stream: true
+    }, (msg) => {
+      if (msg.type === 'llm_chunk') {
+        if (!streamHandle) streamHandle = addStreamingMessage('agent', modelName);
+        appendStreamChunk(streamHandle, msg.chunk);
+      } else if (msg.type === 'llm_done') {
+        if (streamHandle) finalizeStreamingMessage(streamHandle);
+        delete _wsCallbacks[msg.id];
+      } else if (msg.type === 'llm_response') {
+        addMessage(extractResponse(msg.text), 'agent', modelName);
+        delete _wsCallbacks[msg.id];
+      } else if (msg.type === 'error') {
+        if (streamHandle) finalizeStreamingMessage(streamHandle);
+        addMessage('Error: ' + (msg.detail || msg.error || 'LLM query failed'), 'system');
+        delete _wsCallbacks[msg.id];
+      }
+    });
+    return;
+  }
+
+  await api('/user/select/llms', { method: 'POST', body: JSON.stringify([selModel]) });
 
   const data = await api('/query', {
     method: 'POST',
@@ -1181,7 +1312,7 @@ async function submitOrchestrator(text) {
     if (memData && memData.memories && memData.memories.length) {
       const lines = memData.memories.slice(0, 10).map(m => {
         const owner = (m.metadata || {}).owner_agent || '?';
-        return '[' + owner + ']: ' + (m.content || '').slice(0, 300);
+        return '[' + owner + ']: ' + (m.content || '').slice(0, 1000);
       });
       memoryContext = lines.join('\n');
     }
@@ -1201,6 +1332,9 @@ async function submitOrchestrator(text) {
   if (aiosSettings.orchestrator.provider) orcReq.provider = aiosSettings.orchestrator.provider;
   if (aiosSettings.orchestrator.systemPrompt) {
     orcReq.system_prompt = aiosSettings.orchestrator.systemPrompt;
+  }
+  if (aiosSettings.orchestrator.soul) {
+    orcReq.soul = aiosSettings.orchestrator.soul;
   }
 
   const planData = await api('/orchestrator/plan', {
@@ -1296,8 +1430,69 @@ async function submitOrchestrator(text) {
     return ready;
   }
 
+  // Execute an orchestrator/mcp step directly
+  async function executeMcpStep(step) {
+    const pl = activePipeline;
+    step.status = 'running';
+    renderPipeline();
+
+    const orcEntity = { type: 'orchestrator', id: 'orchestrator' };
+
+    try {
+      let mcpCall;
+      try { mcpCall = JSON.parse(step.subtask); } catch(e) { mcpCall = null; }
+      if (!mcpCall || !mcpCall.server || !mcpCall.tool) {
+        step.status = 'error'; step.result = 'Invalid MCP call in subtask';
+        writeToEntityChat(orcEntity, activeProject, step.result, 'system', 'Orchestrator');
+        renderPipeline(); return;
+      }
+
+      // Inject context from dependencies into arguments
+      const args = mcpCall.arguments || {};
+      const contextParts = [];
+      for (const dep of (step.depends_on || [])) {
+        if (pl.results[dep]) contextParts.push(pl.results[dep].slice(0, 4000));
+      }
+      if (contextParts.length && !args.description) {
+        args.description = contextParts.join('\n');
+      }
+
+      writeToEntityChat(orcEntity, activeProject, 'MCP: ' + mcpCall.server + '/' + mcpCall.tool, 'user', 'Orchestrator');
+
+      const result = await api('/mcp/call', {
+        method: 'POST',
+        body: JSON.stringify({ server: mcpCall.server, tool: mcpCall.tool, arguments: args })
+      });
+
+      if (result && result.status === 'success') {
+        const content = result.result?.content;
+        let resultText = '';
+        if (Array.isArray(content)) {
+          resultText = content.filter(c => c.type === 'text').map(c => c.text).join('\n');
+        }
+        if (!resultText) resultText = JSON.stringify(result.result || result);
+        step.result = resultText;
+        step.status = 'completed';
+        pl.results[step.step] = step.result;
+        writeToEntityChat(orcEntity, activeProject, step.result.slice(0, 2000), 'agent', 'MCP');
+      } else {
+        step.status = 'error';
+        step.result = 'MCP error: ' + JSON.stringify(result);
+        writeToEntityChat(orcEntity, activeProject, step.result, 'system', 'Orchestrator');
+      }
+    } catch(e) {
+      step.status = 'error'; step.result = 'MCP exception: ' + e.message;
+      writeToEntityChat(orcEntity, activeProject, step.result, 'system', 'Orchestrator');
+    }
+    renderPipeline();
+  }
+
   // Execute a single step, returns when done
   async function executeStep(step) {
+    if (step.agent_id === 'orchestrator/mcp') {
+      return executeMcpStep(step);
+    }
+
     const pl = activePipeline;
     step.status = 'running';
     renderPipeline();
@@ -1306,7 +1501,7 @@ async function submitOrchestrator(text) {
 
     const contextParts = [];
     for (const dep of (step.depends_on || [])) {
-      if (pl.results[dep]) contextParts.push('[Step ' + dep + ' result]: ' + pl.results[dep].slice(0, 1000));
+      if (pl.results[dep]) contextParts.push('[Step ' + dep + ' result]: ' + pl.results[dep].slice(0, 4000));
     }
     let fullTask = step.subtask;
     if (contextParts.length) fullTask = 'Previous results:\n' + contextParts.join('\n') + '\n\nYour task: ' + step.subtask;
@@ -1405,7 +1600,7 @@ async function retryStep(stepNum) {
   // Execute just this step
   const contextParts = [];
   for (const dep of (step.depends_on || [])) {
-    if (activePipeline.results[dep]) contextParts.push('[Step ' + dep + ' result]: ' + activePipeline.results[dep].slice(0, 1000));
+    if (activePipeline.results[dep]) contextParts.push('[Step ' + dep + ' result]: ' + activePipeline.results[dep].slice(0, 4000));
   }
   let fullTask = step.subtask;
   if (contextParts.length) fullTask = 'Previous results:\n' + contextParts.join('\n') + '\n\nYour task: ' + step.subtask;
@@ -1587,13 +1782,23 @@ function renderProcessesModal() {
     el.innerHTML = '<span style="font-size:13px;color:var(--text2)">No processes</span>';
     return;
   }
-  el.innerHTML = lastProcesses.map(p =>
-    '<div class="process-card">'
-    + '<span class="pid">#' + p.execution_id + '</span> ' + p.agent_id
-    + '<div class="task">' + (p.task || '') + '</div>'
-    + '<span class="pstatus ' + p.status + '">' + p.status + '</span>'
-    + '</div>'
-  ).join('');
+  el.innerHTML = lastProcesses.map(p => {
+    const cancelBtn = p.status === 'running'
+      ? ' <button class="btn secondary" style="font-size:10px;padding:2px 8px;margin-left:6px" onclick="cancelAgent(\'' + p.execution_id + '\')">Cancel</button>'
+      : '';
+    return '<div class="process-card">'
+      + '<span class="pid">#' + p.execution_id + '</span> ' + p.agent_id
+      + '<div class="task">' + (p.task || '') + '</div>'
+      + '<span class="pstatus ' + p.status + '">' + p.status + '</span>'
+      + cancelBtn
+      + '</div>';
+  }).join('');
+}
+
+async function cancelAgent(execId) {
+  const data = await api('/agents/' + execId + '/cancel', { method: 'POST' });
+  if (data) addMessage('Cancelled: ' + execId + ' (' + (data.status || '') + ')', 'system');
+  loadProcesses();
 }
 
 function toggleCollapsible(id) {
@@ -1752,6 +1957,14 @@ let aiosSettings = {
     model: '',
     provider: '',
     systemPrompt: DEFAULT_ORCHESTRATOR_PROMPT,
+    soul: `Ты — координатор команды AI-агентов в системе AIOS. Твоя главная задача — эффективно распределять работу между агентами.
+
+Принципы работы:
+1. ДАННЫЕ СОБИРАЕШЬ ТЫ. Если задача требует данных из внешних систем (Linear, GitHub и др.) — сначала собери нужные данные через MCP tools самостоятельно, затем передай их агентам в контексте подзадачи. Агенты не должны сами ходить в MCP.
+2. НЕ ДРОБИ БЕЗ НУЖДЫ. Если задачу может выполнить один агент — отдай её одному. Разбивай на шаги только когда это действительно необходимо.
+3. КОНТЕКСТ ВАЖЕН. Передавай агентам всю релевантную информацию: собранные данные, результаты предыдущих шагов, ограничения. Агент не знает ничего, кроме того, что ты ему дал.
+4. ВЫБИРАЙ ПРАВИЛЬНОГО АГЕНТА. Сопоставляй тип задачи с возможностями агента. Кодинг — codex/claude_code, исследование — hermes, и т.д.
+5. ЯЗЫК ПОЛЬЗОВАТЕЛЯ. Общайся и формулируй подзадачи на том же языке, на котором пользователь написал задачу.`,
     requireApproval: true,
   }
 };
@@ -1761,8 +1974,14 @@ function loadAiosSettings() {
     const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (raw) {
       const saved = JSON.parse(raw);
+      const defaults = { ...aiosSettings };
       aiosSettings = { ...aiosSettings, ...saved };
-      aiosSettings.orchestrator = { ...aiosSettings.orchestrator, ...(saved.orchestrator || {}) };
+      const savedOrc = saved.orchestrator || {};
+      aiosSettings.orchestrator = { ...defaults.orchestrator, ...savedOrc };
+      // Preserve default soul if saved value is empty (first upgrade)
+      if (!savedOrc.soul && defaults.orchestrator.soul) {
+        aiosSettings.orchestrator.soul = defaults.orchestrator.soul;
+      }
     }
   } catch(e) {}
   applySystemName();
@@ -1821,8 +2040,13 @@ function switchSettingsTab(tab) {
       + '</select>'
       + '</div>'
       + '<div class="settings-section">'
-      + '<div class="settings-section-title">System Prompt</div>'
-      + '<label>System prompt for the planner (use {agents_block} to insert available agents list)</label>'
+      + '<div class="settings-section-title">Soul / Душа оркестратора</div>'
+      + '<label>Инструкция поведения и философия оркестратора. Передаётся вместе с задачей пользователя (user message), не заменяет системный промпт.</label>'
+      + '<textarea id="setOrcSoul" style="min-height:150px" placeholder="Например: Ты — координатор команды агентов. Сначала собери нужные данные через MCP tools, затем распредели задачи между агентами, передавая им собранный контекст...">' + escapeHtml(aiosSettings.orchestrator.soul || '') + '</textarea>'
+      + '</div>'
+      + '<div class="settings-section">'
+      + '<div class="settings-section-title">System Prompt (техн.)</div>'
+      + '<label>Технический системный промпт планировщика (use {agents_block} для списка агентов). Обычно менять не нужно.</label>'
       + '<textarea id="setOrcPrompt" style="min-height:200px">' + escapeHtml(aiosSettings.orchestrator.systemPrompt || '') + '</textarea>'
       + '</div>'
       + '<div class="settings-section">'
@@ -1857,6 +2081,9 @@ function collectSettingsFromForm() {
     }
   }
 
+  const soulEl = document.getElementById('setOrcSoul');
+  if (soulEl) aiosSettings.orchestrator.soul = soulEl.value;
+
   const promptEl = document.getElementById('setOrcPrompt');
   if (promptEl) aiosSettings.orchestrator.systemPrompt = promptEl.value;
 
@@ -1874,6 +2101,7 @@ function saveAndCloseSettings() {
 
 
 // Init
+wsConnect();
 loadAiosSettings();
 loadChatHistories();
 loadSettings();
@@ -1881,6 +2109,7 @@ refreshAll();
 setInterval(loadStatus, 10000);
 setInterval(loadProcesses, 5000);
 setInterval(loadMemories, 15000);
+setInterval(syncAgentsFromKernel, 30000);
 loadMemories();
 loadGitStatus();
 </script>

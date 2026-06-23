@@ -1,5 +1,5 @@
 from typing_extensions import Literal
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, model_validator
 from typing import Optional, Dict, Any, Union
 from dotenv import load_dotenv
@@ -23,7 +23,7 @@ from aios.hooks.modules.scheduler import rr_scheduler_nonblock as rr_scheduler
 from aios.syscall.syscall import useSysCall
 from aios.config.config_manager import config
 from aios.tool.mcp_client import MCPManager
-from aios.orchestrator import create_plan, execute_plan
+from aios.orchestrator import create_plan, execute_plan, bind_kernel as bind_orchestrator, set_mcp_manager as set_orchestrator_mcp
 from aios.memory.context_injector import ContextInjector
 from aios.memory.conversation_extractor import ConversationExtractor
 
@@ -38,6 +38,7 @@ from cerebrum.storage.apis import StorageQuery, StorageResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 import asyncio
+import time
 
 import uvicorn
 
@@ -56,13 +57,15 @@ app.add_middleware(
 )
 
 # Store component configurations and instances
-global active_components 
+global active_components
 active_components = {
     "llm": None,
     "storage": None,
     "memory": None,
     "tool": None
 }
+
+BRIDGE_AGENTS_DIR = Path(os.path.join(os.path.dirname(__file__), "..", "..", "Cerebrum", "cerebrum", "example", "agents"))
 
 global selected_llms
 selected_llms = {
@@ -168,12 +171,12 @@ def initialize_llm_cores(config: dict) -> Any:
         )
         
         if llms:
-            print("✅ LLM cores initialized")
+            print("[OK] LLM cores initialized")
             return llms
         raise ValueError("LLM core initialization returned None")
         
     except Exception as e:
-        print(f"⚠️ Error initializing LLM core: {str(e)}")
+        print(f"[WARN] Error initializing LLM core: {str(e)}")
         return None
 
 def initialize_storage_manager(storage_config: dict) -> Any:
@@ -184,10 +187,10 @@ def initialize_storage_manager(storage_config: dict) -> Any:
             use_vector_db=storage_config.get("use_vector_db", True),
             **(storage_config.get("vector_db_config", {}) or {}),
         )
-        print("✅ Storage manager initialized")
+        print("[OK] Storage manager initialized")
         return storage_manager
     except Exception as e:
-        print(f"❌ Storage setup failed: {str(e)}")
+        print(f"[ERR] Storage setup failed: {str(e)}")
         raise Exception(f"Failed to initialize storage manager: {str(e)}")
 
 def initialize_memory_manager(memory_config: dict, storage_manager: Any) -> Any:
@@ -196,10 +199,10 @@ def initialize_memory_manager(memory_config: dict, storage_manager: Any) -> Any:
         memory_manager = useMemoryManager(
             log_mode=memory_config.get("log_mode", "console"),
         )
-        print("✅ Memory manager initialized")
+        print("[OK] Memory manager initialized")
         return memory_manager
     except Exception as e:
-        print(f"❌ Memory setup failed: {str(e)}")
+        print(f"[ERR] Memory setup failed: {str(e)}")
         raise Exception(f"Failed to initialize memory manager: {str(e)}")
 
 def initialize_tool_manager() -> Any:
@@ -207,7 +210,7 @@ def initialize_tool_manager() -> Any:
     try:
         print("\n[DEBUG] ===== Setting up Tool Manager =====")
         tool_manager = useToolManager()
-        print("✅ Tool manager initialized")
+        print("[OK] Tool manager initialized")
         return tool_manager
     except Exception as e:
         error_msg = str(e)
@@ -257,11 +260,11 @@ def initialize_scheduler(components: dict, scheduler_config: dict) -> Any:
                 get_tool_syscall=None,
             )
         scheduler.start()
-        print("✅ Scheduler initialized and started")
+        print("[OK] Scheduler initialized and started")
         return scheduler
     
     except Exception as e:
-        print(f"❌ Scheduler setup failed: {str(e)}")
+        print(f"[ERR] Scheduler setup failed: {str(e)}")
         raise Exception(f"Failed to initialize scheduler: {str(e)}")
 
 def initialize_agent_factory(agent_factory_config: dict) -> dict:
@@ -271,13 +274,13 @@ def initialize_agent_factory(agent_factory_config: dict) -> dict:
             log_mode=agent_factory_config.get("log_mode", "console"),
             max_workers=agent_factory_config.get("max_workers", 64)
         )
-        print("✅ Agent factory initialized")
+        print("[OK] Agent factory initialized")
         return {
             "submit": submit_agent,
             "await": await_agent_execution,
         }
     except Exception as e:
-        print(f"❌ Agent factory setup failed: {str(e)}")
+        print(f"[ERR] Agent factory setup failed: {str(e)}")
         raise Exception(f"Failed to initialize agent factory: {str(e)}")
 
 def initialize_components() -> dict:
@@ -324,13 +327,13 @@ def initialize_components() -> dict:
                     )
                 )
                 print(
-                    "✅ Personalization components "
+                    "[OK] Personalization components "
                     "(ContextInjector, ConversationExtractor) "
                     "initialized"
                 )
             except Exception as e:
                 print(
-                    f"⚠️ Personalization setup failed "
+                    f"[WARN] Personalization setup failed "
                     f"(non-fatal): {str(e)}"
                 )
                 syscall_executor.context_injector = None
@@ -351,11 +354,11 @@ def initialize_components() -> dict:
         components["scheduler"] = initialize_scheduler(components, scheduler_config)
         components["factory"] = initialize_agent_factory(agent_factory_config)
 
-        print("✅ All components initialized successfully")
+        print("[OK] All components initialized successfully")
         return components
 
     except Exception as e:
-        print(f"❌ Component initialization failed: {str(e)}")
+        print(f"[ERR] Component initialization failed: {str(e)}")
         raise
 
 # Initialize components when starting up
@@ -369,6 +372,44 @@ def _ensure_initialized():
 
 # Initialize on first import (uvicorn worker)
 _ensure_initialized()
+
+def _bind_orchestrator_to_kernel():
+    """Wire orchestrator to call kernel functions directly instead of HTTP."""
+    comps = active_components or {}
+    factory = comps.get("factory", {})
+    submit_fn = factory.get("submit")
+    await_fn = factory.get("await")
+    if not submit_fn or not await_fn:
+        return
+
+    def _get_agents_list():
+        agents = []
+        bridge_names = ["hermes_agent", "claude_code_agent", "codex_agent"]
+        for name in bridge_names:
+            config_path = BRIDGE_AGENTS_DIR / name / "config.json"
+            if not config_path.exists():
+                continue
+            try:
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = json.load(f)
+                role = cfg.get("role", {})
+                agents.append({
+                    "agent_id": f"aios_local/{name}",
+                    "name": name,
+                    "description": " ".join(cfg.get("description", [])).strip(),
+                    "capabilities": role.get("capabilities", []),
+                    "strengths": role.get("strengths", ""),
+                    "priority": role.get("priority", 99),
+                    "timeout": role.get("timeout", 300),
+                })
+            except Exception:
+                continue
+        agents.sort(key=lambda a: a["priority"])
+        return agents
+
+    bind_orchestrator(execute_request, submit_fn, await_fn, _get_agents_list)
+
+_bind_orchestrator_to_kernel()
 
 def restart_kernel():
     """Restart kernel service and reload configuration"""
@@ -385,10 +426,10 @@ def restart_kernel():
         if not active_components:
             raise Exception("Failed to initialize components")
             
-        print("✅ All components reinitialized successfully")
+        print("[OK] All components reinitialized successfully")
         
     except Exception as e:
-        print(f"❌ Error restarting kernel: {str(e)}")
+        print(f"[ERR] Error restarting kernel: {str(e)}")
         print(f"Stack trace: {traceback.format_exc()}")
         raise
 
@@ -507,7 +548,7 @@ PROC_DIR = Path("proc")
 # Create proc directory if it doesn't exist
 PROC_DIR.mkdir(exist_ok=True)
 
-def save_agent_process_info(agent_id: str, execution_id: int, config: Dict[str, Any]):
+def save_agent_process_info(agent_id: str, execution_id: str, config: Dict[str, Any]):
     try:
         process_info = {
             "agent_id": agent_id,
@@ -526,7 +567,7 @@ def save_agent_process_info(agent_id: str, execution_id: int, config: Dict[str, 
         print(f"Failed to save process info: {str(e)}")
         # Don't raise exception - this is not critical functionality
 
-def update_agent_process_status(execution_id: int, status: str, result: Any = None):
+def update_agent_process_status(execution_id: str, status: str, result: Any = None):
     try:
         proc_file = PROC_DIR / f"{execution_id}.json"
         if not proc_file.exists():
@@ -560,8 +601,7 @@ async def list_agent_processes():
                 print(f"Failed to read process file {proc_file}: {str(e)}")
                 continue
                 
-        # Sort by execution ID
-        processes.sort(key=lambda x: x["execution_id"])
+        processes.sort(key=lambda x: str(x.get("execution_id", "")))
         
         return {
             "status": "success",
@@ -572,8 +612,6 @@ async def list_agent_processes():
             status_code=500,
             detail=f"Failed to list processes: {str(e)}"
         )
-
-BRIDGE_AGENTS_DIR = Path(os.path.join(os.path.dirname(__file__), "..", "..", "Cerebrum", "cerebrum", "example", "agents"))
 
 
 @app.get("/agents/roles")
@@ -652,7 +690,7 @@ async def submit_agent(config: AgentSubmit):
 
 
 @app.get("/agents/{execution_id}/status")
-async def get_agent_status(execution_id: int):
+async def get_agent_status(execution_id: str):
     """Get the status of a submitted agent."""
     if "factory" not in active_components or not active_components["factory"]:
         raise HTTPException(status_code=400, detail="Agent factory not initialized")
@@ -662,7 +700,7 @@ async def get_agent_status(execution_id: int):
 
         await_execution = active_components["factory"]["await"]
         try:
-            result = await_execution(int(execution_id))
+            result = await_execution(execution_id)
         except FileNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -697,6 +735,34 @@ async def get_agent_status(execution_id: int):
                 "traceback": stack_trace
             }
         )
+
+@app.post("/agents/{execution_id}/cancel")
+async def cancel_agent(execution_id: str):
+    """Cancel a running agent by execution ID."""
+    from aios.hooks.stores import processes as ProcessStore
+
+    future = ProcessStore.AGENT_PROCESSES.get(execution_id)
+
+    if future is None:
+        proc_file = PROC_DIR / f"{execution_id}.json"
+        if proc_file.exists():
+            update_agent_process_status(execution_id, "cancelled")
+            return {"status": "cancelled", "execution_id": execution_id,
+                    "message": "No active future; marked as cancelled in process log"}
+        raise HTTPException(status_code=404, detail=f"Process '{execution_id}' not found")
+
+    if future.done():
+        return {"status": "already_done", "execution_id": execution_id}
+
+    cancelled = future.cancel()
+    if not cancelled:
+        update_agent_process_status(execution_id, "cancelled")
+        return {"status": "marked_cancelled", "execution_id": execution_id,
+                "message": "Task already executing; marked as cancelled but thread may still run"}
+
+    update_agent_process_status(execution_id, "cancelled")
+    return {"status": "cancelled", "execution_id": execution_id}
+
 
 @app.post("/core/cleanup")
 async def cleanup_components():
@@ -826,6 +892,8 @@ async def handle_query(request: QueryRequest):
                 operation_type=request.query_data.operation_type
             )
             return execute_request(request.agent_name, query)
+    except TimeoutError as e:
+        raise HTTPException(status_code=504, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -885,6 +953,7 @@ class OrchestratorRequest(BaseModel):
     model: Optional[str] = None
     provider: Optional[str] = None
     system_prompt: Optional[str] = None
+    soul: Optional[str] = None
 
 
 @app.get("/memory/list")
@@ -909,6 +978,19 @@ async def memory_list(user_id: str = None):
         return {"memories": [], "count": 0, "error": str(e)}
 
 
+@app.post("/memory/cleanup")
+async def memory_cleanup(ttl_hours: int = 72, max_per_project: int = 200):
+    """Remove expired memories and enforce per-project cap."""
+    mm = active_components.get("memory")
+    if not mm or not hasattr(mm, "provider"):
+        return {"removed": 0, "detail": "Memory not initialized"}
+    provider = mm.provider
+    if not hasattr(provider, "cleanup_expired"):
+        return {"removed": 0, "detail": "Provider does not support cleanup"}
+    removed = provider.cleanup_expired(ttl_hours=ttl_hours, max_per_project=max_per_project)
+    return {"removed": removed}
+
+
 @app.post("/orchestrator/plan")
 async def orchestrator_plan(req: OrchestratorRequest):
     """Create an execution plan for a high-level task."""
@@ -918,7 +1000,8 @@ async def orchestrator_plan(req: OrchestratorRequest):
             task_with_ctx = f"Conversation context:\n{req.context}\n\nCurrent task: {req.task}"
         plan = await asyncio.to_thread(
             create_plan, task_with_ctx, req.project_id, req.project_path,
-            model=req.model, provider=req.provider, custom_system_prompt=req.system_prompt
+            model=req.model, provider=req.provider, custom_system_prompt=req.system_prompt,
+            soul=req.soul
         )
         if "error" in plan:
             raise HTTPException(status_code=400, detail=plan)
@@ -961,7 +1044,8 @@ async def orchestrator_execute(req: OrchestratorRequest):
             task_with_ctx = f"Conversation context:\n{req.context}\n\nCurrent task: {req.task}"
         plan = await asyncio.to_thread(
             create_plan, task_with_ctx, req.project_id, req.project_path,
-            model=req.model, provider=req.provider, custom_system_prompt=req.system_prompt
+            model=req.model, provider=req.provider, custom_system_prompt=req.system_prompt,
+            soul=req.soul
         )
         if "error" in plan:
             raise HTTPException(status_code=400, detail=plan)
@@ -1004,11 +1088,22 @@ try:
     if _mcp_cfg:
         mcp_manager.load_from_config(_mcp_cfg)
         mcp_manager.start_all()
-        print(f"✅ MCP manager: {len(mcp_manager.server_names)} server(s) loaded")
+        print(f"[OK] MCP manager: {len(mcp_manager.server_names)} server(s) loaded")
     else:
-        print("ℹ️ No MCP servers configured")
+        print("[INFO] No MCP servers configured")
 except Exception as e:
-    print(f"⚠️ MCP manager init error (non-fatal): {e}")
+    print(f"[WARN] MCP manager init error (non-fatal): {e}")
+
+# Attach MCP manager to LLM adapter and tool manager
+if active_components:
+    if active_components.get("llms"):
+        active_components["llms"].mcp_manager = mcp_manager
+        print("[OK] MCP manager attached to LLM adapter")
+    if active_components.get("tool"):
+        active_components["tool"].mcp_manager = mcp_manager
+        print("[OK] MCP manager attached to tool manager")
+    set_orchestrator_mcp(mcp_manager)
+    print("[OK] MCP manager attached to orchestrator")
 
 
 class MCPCallRequest(BaseModel):
@@ -1264,6 +1359,249 @@ async def save_webui_settings(request: Request):
     with open(WEBUI_SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     return {"status": "success"}
+
+# ===== WebSocket =====
+
+_ws_clients: set[WebSocket] = set()
+
+
+async def _ws_broadcast(msg: dict):
+    dead = set()
+    for ws in _ws_clients:
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            dead.add(ws)
+    _ws_clients -= dead
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    _ws_clients.add(ws)
+    try:
+        while True:
+            raw = await ws.receive_json()
+            msg_type = raw.get("type", "")
+            request_id = raw.get("id")
+
+            if msg_type == "llm_query":
+                asyncio.create_task(_ws_handle_llm(ws, raw, request_id))
+            elif msg_type == "agent_submit":
+                asyncio.create_task(_ws_handle_agent(ws, raw, request_id))
+            elif msg_type == "agent_cancel":
+                eid = raw.get("execution_id", "")
+                from aios.hooks.stores import processes as ProcessStore
+                future = ProcessStore.AGENT_PROCESSES.get(eid)
+                if not future:
+                    await ws.send_json({"type": "error", "id": request_id, "detail": "Process not found"})
+                elif future.done():
+                    await ws.send_json({"type": "agent_cancelled", "id": request_id, "execution_id": eid, "detail": "Already done"})
+                else:
+                    future.cancel()
+                    update_agent_process_status(eid, "cancelled")
+                    await ws.send_json({"type": "agent_cancelled", "id": request_id, "execution_id": eid})
+            elif msg_type == "ping":
+                await ws.send_json({"type": "pong", "id": request_id})
+            else:
+                await ws.send_json({"type": "error", "id": request_id,
+                                    "detail": f"Unknown message type: {msg_type}"})
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning("WebSocket error: %s", e)
+    finally:
+        _ws_clients.discard(ws)
+
+
+def _resolve_litellm_model(llms_list: list) -> tuple:
+    """Resolve litellm model string and api_base from selected_llms config."""
+    if not llms_list:
+        return None, None
+    spec = llms_list[0]
+    name = spec.get("name", "")
+    backend = spec.get("backend") or spec.get("provider") or "openai"
+    api_base = spec.get("hostname") or spec.get("api_base")
+    prefix = f"{backend}/"
+    model_str = name if name.startswith(prefix) else prefix + name
+    return model_str, api_base
+
+
+async def _ws_handle_llm(ws: WebSocket, raw: dict, request_id: str):
+    try:
+        import litellm
+        messages = raw.get("messages", [])
+        project_id = raw.get("project_id", "global")
+        stream = raw.get("stream", True)
+
+        llm_spec = raw.get("llms", raw.get("llm"))
+        if llm_spec and isinstance(llm_spec, list):
+            global selected_llms
+            selected_llms["llms"] = copy.deepcopy(llm_spec)
+        elif llm_spec and isinstance(llm_spec, dict):
+            selected_llms["llms"] = [copy.deepcopy(llm_spec)]
+
+        llms = copy.deepcopy(selected_llms["llms"]) if selected_llms["llms"] else None
+        model_str, api_base = _resolve_litellm_model(llms)
+
+        if not model_str:
+            await ws.send_json({"type": "error", "id": request_id, "detail": "No LLM configured"})
+            return
+
+        # Inject MCP tools
+        mcp_tools = []
+        try:
+            mcp_tools = mcp_manager.get_tools_as_openai_functions()
+        except Exception:
+            pass
+
+        completion_kwargs = {
+            "model": model_str,
+            "messages": messages,
+            "temperature": 1.0,
+            "max_tokens": 1000,
+            "stream": False,
+        }
+        if api_base:
+            completion_kwargs["api_base"] = api_base
+        if mcp_tools:
+            completion_kwargs["tools"] = mcp_tools
+
+        MAX_TOOL_ROUNDS = 10
+        full_text = ""
+
+        for _round in range(MAX_TOOL_ROUNDS):
+            response = await asyncio.to_thread(litellm.completion, **completion_kwargs)
+            choice = response.choices[0]
+
+            if choice.message.tool_calls:
+                tool_results = []
+                for tc in choice.message.tool_calls:
+                    fn_name = tc.function.name
+                    try:
+                        fn_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                    except json.JSONDecodeError:
+                        fn_args = {}
+
+                    await ws.send_json({
+                        "type": "llm_tool_call", "id": request_id,
+                        "tool": fn_name, "arguments": fn_args
+                    })
+
+                    try:
+                        result = mcp_manager.execute_tool_call(fn_name, fn_args)
+                        result_str = json.dumps(result, ensure_ascii=False) if not isinstance(result, str) else result
+                    except Exception as e:
+                        result_str = f"Error: {e}"
+
+                    tool_results.append({
+                        "tool_call_id": tc.id,
+                        "role": "tool",
+                        "content": result_str
+                    })
+
+                messages.append(choice.message.model_dump())
+                messages.extend(tool_results)
+                completion_kwargs["messages"] = messages
+            else:
+                full_text = choice.message.content or ""
+                break
+
+        if stream:
+            await ws.send_json({
+                "type": "llm_chunk", "id": request_id, "chunk": full_text
+            })
+            await ws.send_json({"type": "llm_done", "id": request_id, "text": full_text})
+        else:
+            await ws.send_json({"type": "llm_response", "id": request_id, "text": full_text})
+
+        # Save to memory
+        try:
+            mm = active_components.get("memory")
+            if mm and hasattr(mm, "provider"):
+                user_msg = messages[-1]["content"] if messages else ""
+                if user_msg and full_text:
+                    from aios.memory.note import MemoryNote
+                    note = MemoryNote(
+                        content=f"Task: {user_msg[:200]}\nResult: {full_text[:1000]}",
+                        keywords=[], category="llm_chat",
+                        metadata={"owner_agent": "llm/webui", "user_id": project_id,
+                                  "sharing_policy": "shared", "memory_type": "task_context"})
+                    mm.provider.add_memory(note)
+        except Exception:
+            pass
+
+    except TimeoutError as e:
+        await ws.send_json({"type": "error", "id": request_id, "detail": str(e)})
+    except Exception as e:
+        await ws.send_json({"type": "error", "id": request_id, "detail": str(e)})
+
+
+async def _ws_handle_agent(ws: WebSocket, raw: dict, request_id: str):
+    try:
+        agent_id = raw.get("agent_id", "")
+        task_input = raw.get("agent_config", {})
+        if "project_id" not in task_input:
+            task_input["project_id"] = raw.get("project_id", "global")
+
+        factory = active_components.get("factory", {})
+        submit_fn = factory.get("submit")
+        await_fn = factory.get("await")
+        if not submit_fn:
+            await ws.send_json({"type": "error", "id": request_id, "detail": "Agent factory not initialized"})
+            return
+
+        execution_id = submit_fn(agent_name=agent_id, task_input=task_input)
+
+        save_agent_process_info(agent_id, execution_id, task_input)
+        await ws.send_json({"type": "agent_submitted", "id": request_id,
+                            "execution_id": execution_id})
+
+        # Push status updates instead of client polling
+        poll_interval = 1.0
+        timeout = 600
+        start = time.time()
+        while time.time() - start < timeout:
+            await asyncio.sleep(poll_interval)
+            try:
+                result = await_fn(execution_id)
+            except ValueError:
+                await ws.send_json({"type": "agent_error", "id": request_id,
+                                    "execution_id": execution_id, "detail": "Process not found"})
+                return
+
+            if result is not None:
+                update_agent_process_status(execution_id, "completed", result)
+                await ws.send_json({"type": "agent_completed", "id": request_id,
+                                    "execution_id": execution_id, "result": result})
+                return
+
+            poll_interval = min(poll_interval * 1.5, 10.0)
+
+        await ws.send_json({"type": "agent_timeout", "id": request_id,
+                            "execution_id": execution_id, "detail": f"Timeout after {timeout}s"})
+
+    except Exception as e:
+        await ws.send_json({"type": "error", "id": request_id, "detail": str(e)})
+
+
+MEMORY_CLEANUP_INTERVAL = 3600  # seconds (1 hour)
+
+@app.on_event("startup")
+async def _schedule_memory_cleanup():
+    async def _cleanup_loop():
+        while True:
+            await asyncio.sleep(MEMORY_CLEANUP_INTERVAL)
+            try:
+                mm = active_components.get("memory") if active_components else None
+                if mm and hasattr(mm, "provider") and hasattr(mm.provider, "cleanup_expired"):
+                    removed = mm.provider.cleanup_expired()
+                    if removed:
+                        logger.info("Memory cleanup: removed %d expired entries", removed)
+            except Exception:
+                logger.exception("Memory cleanup error")
+    asyncio.create_task(_cleanup_loop())
+
 
 # Add a main function to run the app directly
 if __name__ == "__main__":

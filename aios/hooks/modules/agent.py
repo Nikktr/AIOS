@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, Future
-from random import randint
+import uuid
 from typing import Any, Tuple, Callable, Dict
 from aios.syscall.syscall import useSysCall
 from aios.hooks.types.agent import AgentSubmitDeclaration, FactoryParams
@@ -60,10 +60,7 @@ def useFactory(
             declaration_params.task_input,
         )
 
-        # Generate a unique process ID
-        process_id = randint(100000, 999999)
-        while process_id in ids:
-            process_id = randint(100000, 999999)
+        process_id = uuid.uuid4().hex[:12]
 
         ProcessStore.addProcess(_submitted_agent, process_id)
 

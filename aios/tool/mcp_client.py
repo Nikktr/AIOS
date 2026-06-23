@@ -9,6 +9,7 @@ import json
 import threading
 import logging
 import os
+from queue import Queue, Empty
 from typing import Any
 from abc import ABC, abstractmethod
 
@@ -53,13 +54,18 @@ class BaseMCPConnection(ABC):
 
 
 class StdioMCPConnection(BaseMCPConnection):
+    REQUEST_TIMEOUT = 60
+
     def __init__(self, name: str, command: str, args: list[str], env: dict[str, str] | None = None):
         super().__init__(name)
         self.command = command
         self.args = args
         self.env = env or {}
         self._process: subprocess.Popen | None = None
-        self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._pending: dict[int, threading.Event] = {}
+        self._results: dict[int, dict] = {}
+        self._reader_thread: threading.Thread | None = None
 
     def start(self):
         if self._process and self._process.poll() is None:
@@ -74,38 +80,74 @@ class StdioMCPConnection(BaseMCPConnection):
             encoding="utf-8",
             errors="replace",
         )
+        self._pending.clear()
+        self._results.clear()
+        self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._reader_thread.start()
         self._initialize()
 
+    def _reader_loop(self):
+        """Background thread: reads stdout and dispatches responses by id."""
+        while self._process and self._process.poll() is None:
+            try:
+                line = self._process.stdout.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                rid = msg.get("id")
+                if rid is not None and rid in self._pending:
+                    self._results[rid] = msg
+                    self._pending[rid].set()
+            except Exception:
+                break
+        for evt in self._pending.values():
+            evt.set()
+
+    def _ensure_running(self):
+        if self._process and self._process.poll() is None:
+            return
+        logger.warning("MCP server '%s' died (rc=%s), restarting...",
+                        self.name, self._process.returncode if self._process else "N/A")
+        self._tools = None
+        self.start()
+
     def _send_request(self, method: str, params: dict | None = None) -> dict:
-        if not self._process or self._process.poll() is not None:
-            raise RuntimeError(f"MCP server '{self.name}' is not running")
+        self._ensure_running()
 
         req_id = self._next_id()
         request = {"jsonrpc": JSONRPC_VERSION, "id": req_id, "method": method}
         if params is not None:
             request["params"] = params
 
+        evt = threading.Event()
+        self._pending[req_id] = evt
+
         line = json.dumps(request) + "\n"
-        with self._lock:
+        with self._write_lock:
             self._process.stdin.write(line)
             self._process.stdin.flush()
-            while True:
-                response_line = self._process.stdout.readline()
-                if not response_line:
-                    stderr = self._process.stderr.read() if self._process.stderr else ""
-                    raise RuntimeError(f"MCP server '{self.name}' closed: {stderr[:500]}")
-                response_line = response_line.strip()
-                if not response_line:
-                    continue
-                try:
-                    response = json.loads(response_line)
-                except json.JSONDecodeError:
-                    continue
-                if "id" in response and response["id"] == req_id:
-                    if "error" in response:
-                        err = response["error"]
-                        raise RuntimeError(f"MCP error ({err.get('code')}): {err.get('message')}")
-                    return response.get("result", {})
+
+        if not evt.wait(timeout=self.REQUEST_TIMEOUT):
+            self._pending.pop(req_id, None)
+            raise TimeoutError(f"MCP server '{self.name}' did not respond within {self.REQUEST_TIMEOUT}s")
+
+        self._pending.pop(req_id, None)
+        response = self._results.pop(req_id, None)
+
+        if response is None:
+            stderr = self._process.stderr.read() if self._process and self._process.stderr else ""
+            raise RuntimeError(f"MCP server '{self.name}' closed: {stderr[:500]}")
+
+        if "error" in response:
+            err = response["error"]
+            raise RuntimeError(f"MCP error ({err.get('code')}): {err.get('message')}")
+        return response.get("result", {})
 
     def _initialize(self):
         self._send_request("initialize", {
@@ -122,7 +164,7 @@ class StdioMCPConnection(BaseMCPConnection):
         if params:
             notif["params"] = params
         line = json.dumps(notif) + "\n"
-        with self._lock:
+        with self._write_lock:
             self._process.stdin.write(line)
             self._process.stdin.flush()
 
@@ -138,6 +180,8 @@ class StdioMCPConnection(BaseMCPConnection):
                 self._process.kill()
         self._process = None
         self._tools = None
+        self._pending.clear()
+        self._results.clear()
 
 
 class HttpMCPConnection(BaseMCPConnection):
@@ -278,6 +322,100 @@ class MCPManager:
         if not server.is_running():
             server.start()
         return server.call_tool(tool_name, arguments)
+
+    def call_tools_parallel(self, calls: list[dict]) -> list[dict]:
+        """Execute multiple tool calls in parallel.
+
+        Args:
+            calls: List of dicts with keys: server, tool, arguments.
+
+        Returns:
+            List of dicts with keys: server, tool, result or error.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _do(call):
+            try:
+                result = self.call_tool(call["server"], call["tool"], call.get("arguments"))
+                return {"server": call["server"], "tool": call["tool"], "result": result}
+            except Exception as e:
+                return {"server": call["server"], "tool": call["tool"], "error": str(e)}
+
+        results = [None] * len(calls)
+        with ThreadPoolExecutor(max_workers=min(len(calls), 8)) as pool:
+            futures = {pool.submit(_do, c): i for i, c in enumerate(calls)}
+            for f in as_completed(futures):
+                results[futures[f]] = f.result()
+        return results
+
+    def get_tools_as_openai_functions(self, servers: list[str] | None = None) -> list[dict]:
+        """Convert MCP tool schemas to OpenAI function-calling format.
+
+        Tool names are namespaced as ``mcp__<server>__<tool_name>`` so the
+        caller can route tool_calls back through :meth:`execute_tool_call`.
+
+        Args:
+            servers: Restrict to these server names. ``None`` = all servers.
+
+        Returns:
+            List of dicts ready for ``litellm.completion(tools=...)``.
+        """
+        functions: list[dict] = []
+        target = servers or list(self._servers.keys())
+        for srv_name in target:
+            if srv_name not in self._servers:
+                continue
+            server = self._servers[srv_name]
+            try:
+                if not server.is_running():
+                    server.start()
+                tools = server.list_tools()
+            except Exception:
+                continue
+            for t in tools:
+                if "error" in t:
+                    continue
+                name = t.get("name", "")
+                if not name:
+                    continue
+                fn_name = f"mcp__{srv_name}__{name}"
+                schema = t.get("inputSchema", {"type": "object", "properties": {}})
+                schema.pop("$schema", None)
+                schema.pop("additionalProperties", None)
+                functions.append({
+                    "type": "function",
+                    "function": {
+                        "name": fn_name,
+                        "description": (t.get("description") or "")[:1024],
+                        "parameters": schema,
+                    },
+                })
+        return functions
+
+    def execute_tool_call(self, fn_name: str, arguments: dict | None = None) -> Any:
+        """Route an OpenAI-style tool_call back to the right MCP server.
+
+        Args:
+            fn_name: Function name in ``mcp__<server>__<tool>`` format.
+            arguments: Tool arguments dict.
+
+        Returns:
+            MCP tool call result.
+
+        Raises:
+            ValueError: If *fn_name* doesn't match the expected format.
+            KeyError: If the server is not configured.
+        """
+        parts = fn_name.split("__", 2)
+        if len(parts) != 3 or parts[0] != "mcp":
+            raise ValueError(f"Not an MCP tool call: {fn_name}")
+        server_name, tool_name = parts[1], parts[2]
+        return self.call_tool(server_name, tool_name, arguments)
+
+    @staticmethod
+    def is_mcp_tool_call(fn_name: str) -> bool:
+        """Check if a function name is an MCP-namespaced tool call."""
+        return fn_name.startswith("mcp__") and fn_name.count("__") >= 2
 
     def stop_all(self):
         for server in self._servers.values():
