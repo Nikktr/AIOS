@@ -1169,18 +1169,13 @@ async def mcp_project_tools(project_id: str):
     if not bound_servers:
         return {"status": "success", "project": project_id, "servers": {}, "message": "No MCP servers bound to this project"}
 
+    all_tools = mcp_manager.list_all_tools()
     result = {}
     for srv_name in bound_servers:
         if srv_name not in mcp_manager.server_names:
             result[srv_name] = [{"error": f"Server '{srv_name}' not configured"}]
             continue
-        try:
-            srv = mcp_manager._servers[srv_name]
-            if not srv.is_running():
-                srv.start()
-            result[srv_name] = srv.list_tools()
-        except Exception as e:
-            result[srv_name] = [{"error": str(e)}]
+        result[srv_name] = all_tools.get(srv_name, [])
 
     return {"status": "success", "project": project_id, "servers": result}
 
