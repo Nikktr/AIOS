@@ -943,6 +943,83 @@ async def update_config(request: Request):
             detail=f"Failed to update configuration: {str(e)}"
         )
 
+# ===== LLM Chat (REST) =====
+
+class LLMChatRequest(BaseModel):
+    message: str
+    project_id: str = "global"
+    system_prompt: str = ""
+    use_tools: bool = False
+
+@app.post("/llm/chat")
+async def llm_chat(req: LLMChatRequest):
+    """Send a message to the configured LLM and get a response (non-streaming)."""
+    import litellm
+
+    llms = copy.deepcopy(selected_llms["llms"]) if selected_llms["llms"] else None
+    model_str, api_base = _resolve_litellm_model(llms)
+    if not model_str:
+        raise HTTPException(status_code=400, detail="No LLM configured")
+
+    messages = []
+    if req.system_prompt:
+        messages.append({"role": "system", "content": req.system_prompt})
+    messages.append({"role": "user", "content": req.message})
+
+    completion_kwargs = {
+        "model": model_str,
+        "messages": messages,
+        "temperature": 1.0,
+        "max_tokens": 4096,
+        "stream": False,
+    }
+    if api_base:
+        completion_kwargs["api_base"] = api_base
+
+    if req.use_tools:
+        try:
+            mcp_tools = mcp_manager.get_tools_as_openai_functions()
+            if mcp_tools:
+                completion_kwargs["tools"] = mcp_tools
+        except Exception:
+            pass
+
+    MAX_TOOL_ROUNDS = 10
+    full_text = ""
+    tool_calls_log = []
+
+    for _round in range(MAX_TOOL_ROUNDS):
+        response = await asyncio.to_thread(litellm.completion, **completion_kwargs)
+        choice = response.choices[0]
+
+        if choice.message.tool_calls and req.use_tools:
+            for tc in choice.message.tool_calls:
+                fn_name = tc.function.name
+                try:
+                    fn_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                except json.JSONDecodeError:
+                    fn_args = {}
+                try:
+                    result = mcp_manager.execute_tool_call(fn_name, fn_args)
+                    result_str = json.dumps(result, ensure_ascii=False) if not isinstance(result, str) else result
+                except Exception as e:
+                    result_str = f"Error: {e}"
+                tool_calls_log.append({"tool": fn_name, "arguments": fn_args, "result": result_str[:500]})
+                messages.append(choice.message.model_dump())
+                messages.append({"tool_call_id": tc.id, "role": "tool", "content": result_str})
+            completion_kwargs["messages"] = messages
+        else:
+            full_text = choice.message.content or ""
+            break
+
+    return {
+        "status": "success",
+        "response": full_text,
+        "model": model_str,
+        "tool_calls": tool_calls_log if tool_calls_log else None,
+    }
+
+
 # ===== Orchestrator =====
 
 class OrchestratorRequest(BaseModel):
